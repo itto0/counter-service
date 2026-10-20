@@ -548,12 +548,14 @@ def test_onnx_detector_input_size_and_backward_compatibility():
     assert detector1.input_size == (640, 640)
     assert detector1.input_width == 640
     assert detector1.input_height == 640
+    assert detector1.detect == detector1.predict
 
     # Custom input_size tuple
-    detector2 = ONNXDetector(model_path="dummy.onnx", input_size=(1280, 720))
+    detector2 = ONNXDetector(model_path="dummy.onnx", input_size=(1280, 720), classes=[0])
     assert detector2.input_size == (1280, 720)
     assert detector2.input_width == 1280
     assert detector2.input_height == 720
+    assert detector2.classes == {0}
 
     # Backward compatibility with input_width and input_height
     detector3 = ONNXDetector(model_path="dummy.onnx", input_width=320, input_height=240)
@@ -578,6 +580,58 @@ def test_onnx_detector_input_size_and_backward_compatibility():
     detector1.input_name = "test_input"
     assert detector1._input_name == "test_input"
     assert detector1.input_name == "test_input"
+
+
+def test_onnx_detector_classes_filter_and_portrait_letterbox():
+    """Verify classes filter drops unselected classes and portrait frame inverse letterbox is accurate."""
+    from unittest.mock import MagicMock
+    from src.detection.detector import ONNXDetector
+
+    # Only accept class 0
+    detector = ONNXDetector(
+        model_path="dummy.onnx",
+        input_size=(640, 640),
+        classes=[0],
+        class_names={0: "chicken", 1: "other"},
+        conf_threshold=0.3,
+    )
+    detector._session = MagicMock()
+
+    # Portrait 1080x1920 frame
+    frame = np.zeros((1920, 1080, 3), dtype=np.uint8)
+    _ = detector.preprocess(frame)
+    # Ratio = 640 / 1920 = 1/3; pad_w = (640 - 360)/2 = 140; pad_h = 0
+    assert detector._pad_w == 140
+    assert detector._pad_h == 0
+
+    # Raw YOLO output with 2 classes: [1, 6, 2] -> [cx, cy, w, h, cls0_score, cls1_score]
+    # Box 1: class 0 with 0.8 score (should pass)
+    # Box 2: class 1 with 0.9 score (should be filtered out by classes=[0])
+    raw_output = np.array(
+        [
+            [
+                [320.0, 320.0],  # cx
+                [320.0, 320.0],  # cy
+                [60.0, 60.0],    # w
+                [60.0, 60.0],    # h
+                [0.85, 0.05],    # cls 0
+                [0.10, 0.95],    # cls 1
+            ]
+        ],
+        dtype=np.float32,
+    )
+
+    detections = detector.postprocess([raw_output])
+    assert len(detections) == 1
+    assert detections[0].class_id == 0
+    assert detections[0].class_name == "chicken"
+    # Inverse mapping for Box 1:
+    # letterbox: x1 = 320 - 30 = 290, x2 = 320 + 30 = 350
+    # orig_x1 = (290 - 140) / (1/3) = 150 * 3 = 450
+    # orig_x2 = (350 - 140) / (1/3) = 210 * 3 = 630
+    assert pytest.approx(detections[0].x1, abs=1.0) == 450.0
+    assert pytest.approx(detections[0].x2, abs=1.0) == 630.0
+
 
 
 

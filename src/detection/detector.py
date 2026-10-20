@@ -513,7 +513,7 @@ class ONNXDetector(Detector):
             frame, target_shape=(self.input_width, self.input_height)
         )
         rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-        tensor = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+        tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1).astype(np.float32) / 255.0)
         return np.expand_dims(tensor, axis=0)
 
     def _inverse_coords(
@@ -672,3 +672,6 @@ class ONNXDetector(Detector):
             return []
 
         return self.postprocess(outputs)
+
+    # Alias for API uniformity
+    detect = predict
