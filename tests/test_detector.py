@@ -633,6 +633,24 @@ def test_onnx_detector_classes_filter_and_portrait_letterbox():
     assert pytest.approx(detections[0].x2, abs=1.0) == 630.0
 
 
+def test_onnx_detector_cpu_thread_options(monkeypatch):
+    """Verify ONNXDetector configures SessionOptions for edge CPU efficiency."""
+    from unittest.mock import MagicMock
+    from src.detection.detector import ONNXDetector
+
+    mock_ort = MagicMock()
+    mock_session_options = MagicMock()
+    mock_ort.SessionOptions.return_value = mock_session_options
+    monkeypatch.setattr("src.detection.detector.ort", mock_ort, raising=False)
+
+    detector = ONNXDetector(model_path="dummy.onnx")
+    detector._load_model()
+
+    assert mock_ort.SessionOptions.called
+    assert mock_session_options.intra_op_num_threads > 0
+
+
+
 
 
 

@@ -486,7 +486,17 @@ class ONNXDetector(Detector):
             if not providers:
                 providers = ["CPUExecutionProvider"]
 
-        self._session = ort.InferenceSession(self.model_path, providers=providers)
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = max(1, os.cpu_count() or 1)
+        session_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+
+        self._session = ort.InferenceSession(
+            self.model_path,
+            sess_options=session_options,
+            providers=providers,
+        )
         inputs = self._session.get_inputs() if hasattr(self._session, "get_inputs") else []
         if inputs:
             self._input_name = inputs[0].name
