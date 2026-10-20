@@ -169,14 +169,15 @@ def test_onnx_detector_mocked_end_to_end_yolo26():
         assert det.class_id == 0
         assert det.class_name == "chicken"
         assert pytest.approx(det.confidence, 0.01) == 0.90
-        # Check coordinates scaled back from 640x640 to 640x480
-        # In 640x640 input, x: 100 -> 640/640 * 100 = 100
-        # y: 100 -> 480/640 * 100 = 75
+        # Check coordinates mapped back from 640x640 letterbox to 640x480 original
+        # In 640x640 input with 640x480 frame: ratio = 1.0, pad_w = 0, pad_h = 80
+        # x: (100 - 0) / 1.0 = 100.0
+        # y: (100 - 80) / 1.0 = 20.0
         assert pytest.approx(det.x1, 1.0) == 100.0
-        assert pytest.approx(det.y1, 1.0) == 75.0
+        assert pytest.approx(det.y1, 1.0) == 20.0
         assert pytest.approx(det.x2, 1.0) == 200.0
-        assert pytest.approx(det.y2, 1.0) == 150.0
-        assert det.anchor_bottom_center == pytest.approx((150.0, 150.0), abs=1.0)
+        assert pytest.approx(det.y2, 1.0) == 120.0
+        assert det.anchor_bottom_center == pytest.approx((150.0, 120.0), abs=1.0)
 
 
 def test_onnx_detector_mocked_raw_yolo_with_nms():
@@ -495,6 +496,90 @@ def test_letterbox_image_square_frame_and_custom_color():
     assert pytest.approx(ratio, rel=1e-3) == 640 / 500
     assert pad_w == 0
     assert pad_h == 0
+
+
+def test_onnx_detector_letterbox_inverse_mapping():
+    """Verify ONNXDetector maps letterboxed coordinates back to original frame accurately."""
+    from unittest.mock import MagicMock
+    from src.detection.detector import ONNXDetector
+
+    # Create dummy detector with mock session
+    detector = ONNXDetector(model_path="dummy.onnx", input_size=(640, 640), conf_threshold=0.5)
+    detector._session = MagicMock()
+    detector._input_name = "images"
+    detector._output_name = "output0"
+
+    # Original 1920x1080 frame
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    _ = detector.preprocess(frame)
+
+    assert detector._orig_w == 1920
+    assert detector._orig_h == 1080
+    assert detector._pad_w == 0
+    assert detector._pad_h == 140
+
+    # Simulate a raw YOLO detection on the 640x640 letterboxed frame
+    # Carcass located at center x=320, y=320, w=100, h=100 on letterboxed canvas
+    # [1, 5, 1] format: [cx, cy, w, h, conf]
+    raw_output = np.array([[[320.0], [320.0], [100.0], [100.0], [0.9]]], dtype=np.float32)
+    detections = detector.postprocess([raw_output])
+
+    assert len(detections) == 1
+    det = detections[0]
+    # On letterbox: x1 = 320 - 50 = 270, x2 = 320 + 50 = 370
+    # y1 = 320 - 50 = 270, y2 = 320 + 50 = 370
+    # In original frame: ratio = 640 / 1920 = 1/3
+    # orig_x1 = (270 - 0) / (1/3) = 810
+    # orig_x2 = (370 - 0) / (1/3) = 1110
+    # orig_y1 = (270 - 140) / (1/3) = 130 * 3 = 390
+    # orig_y2 = (370 - 140) / (1/3) = 230 * 3 = 690
+    assert pytest.approx(det.x1, abs=1.0) == 810.0
+    assert pytest.approx(det.x2, abs=1.0) == 1110.0
+    assert pytest.approx(det.y1, abs=1.0) == 390.0
+    assert pytest.approx(det.y2, abs=1.0) == 690.0
+
+
+def test_onnx_detector_input_size_and_backward_compatibility():
+    """Verify input_size and backward-compatible input_width/input_height access and mutation."""
+    from src.detection.detector import ONNXDetector
+
+    # Default initialization
+    detector1 = ONNXDetector(model_path="dummy.onnx")
+    assert detector1.input_size == (640, 640)
+    assert detector1.input_width == 640
+    assert detector1.input_height == 640
+
+    # Custom input_size tuple
+    detector2 = ONNXDetector(model_path="dummy.onnx", input_size=(1280, 720))
+    assert detector2.input_size == (1280, 720)
+    assert detector2.input_width == 1280
+    assert detector2.input_height == 720
+
+    # Backward compatibility with input_width and input_height
+    detector3 = ONNXDetector(model_path="dummy.onnx", input_width=320, input_height=240)
+    assert detector3.input_size == (320, 240)
+    assert detector3.input_width == 320
+    assert detector3.input_height == 240
+
+    # Mutability via input_size property
+    detector3.input_size = (640, 480)
+    assert detector3.input_width == 640
+    assert detector3.input_height == 480
+    assert detector3.input_size == (640, 480)
+
+    # Session property aliases
+    assert detector1.session is None
+    assert detector1._session is None
+    detector1.session = "mock_session"
+    assert detector1._session == "mock_session"
+    assert detector1.session == "mock_session"
+
+    assert detector1.input_name == ""
+    detector1.input_name = "test_input"
+    assert detector1._input_name == "test_input"
+    assert detector1.input_name == "test_input"
+
+
 
 
 

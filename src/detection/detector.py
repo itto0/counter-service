@@ -2,9 +2,16 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Sequence
+import os
+import sys
+from typing import Any, Sequence
 import cv2
 import numpy as np
+
+try:
+    import onnxruntime as ort
+except Exception:
+    ort = None
 
 __all__ = [
     "Detection",
@@ -319,7 +326,7 @@ def letterbox_image(
         pad_color: BGR tuple for padding fill.
 
     Returns:
-        (padded_image, scale_ratio, (pad_w, pad_h))
+        (padded_image, scale_ratio, (pad_left, pad_top))
     """
     orig_h, orig_w = image.shape[:2]
     target_w, target_h = target_shape
@@ -345,19 +352,47 @@ def letterbox_image(
 
 
 class ONNXDetector(Detector):
-    """ONNX Runtime detector supporting YOLO26 (NMS-free) and standard YOLO models."""
+    """ONNX Runtime detector supporting YOLO models with aspect-preserving letterboxing."""
 
     def __init__(
         self,
         model_path: str,
-        conf_threshold: float = 0.5,
+        input_size: tuple[int, int] = (640, 640),
+        conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
-        providers: list[str] | None = None,
+        nms_iou_threshold: float | None = None,
+        classes: list[int] | None = None,
         class_names: Sequence[str] | dict[int, str] | None = None,
+        providers: list[str] | None = None,
+        input_width: int | None = None,
+        input_height: int | None = None,
     ) -> None:
         self.model_path = str(model_path)
+
+        # Handle positional conf_threshold if passed in place of input_size
+        if isinstance(input_size, (int, float)) and not isinstance(input_size, (tuple, list)):
+            conf_threshold = float(input_size)
+            input_size = (640, 640)
+
+        if input_width is not None or input_height is not None:
+            self.input_width = int(input_width) if input_width is not None else 640
+            self.input_height = int(input_height) if input_height is not None else 640
+        elif input_size is not None and isinstance(input_size, (tuple, list)):
+            self.input_width = int(input_size[0])
+            self.input_height = int(input_size[1])
+        else:
+            self.input_width = 640
+            self.input_height = 640
+
         self.conf_threshold = float(conf_threshold)
-        self.iou_threshold = float(iou_threshold)
+        if nms_iou_threshold is not None:
+            self.nms_iou_threshold = float(nms_iou_threshold)
+            self.iou_threshold = self.nms_iou_threshold
+        else:
+            self.iou_threshold = float(iou_threshold)
+            self.nms_iou_threshold = self.iou_threshold
+
+        self.classes = set(classes) if classes is not None else None
 
         if class_names is None:
             self.class_names: dict[int, str] = {0: "chicken"}
@@ -366,17 +401,74 @@ class ONNXDetector(Detector):
         else:
             self.class_names = {idx: name for idx, name in enumerate(class_names)}
 
-        try:
-            import onnxruntime as ort
+        self.providers = providers
 
-            if ort is None:
-                raise ImportError("onnxruntime is None")
-        except Exception as exc:
-            raise RuntimeError(
-                f"onnxruntime is not installed or unavailable: {exc}. "
-                "Please install onnxruntime or onnxruntime-gpu to use ONNXDetector."
-            ) from exc
+        self._session: Any = None
+        self._input_name: str = ""
+        self._output_name: str = ""
+        self._orig_w: int = 0
+        self._orig_h: int = 0
+        self._ratio: float = 1.0
+        self._pad_w: int = 0
+        self._pad_h: int = 0
 
+        # Eagerly load model unless dummy/mock
+        if "dummy" not in self.model_path.lower():
+            self._load_model()
+
+    @property
+    def session(self) -> Any:
+        return self._session
+
+    @session.setter
+    def session(self, value: Any) -> None:
+        self._session = value
+
+    @property
+    def input_name(self) -> str:
+        return self._input_name
+
+    @input_name.setter
+    def input_name(self, value: str) -> None:
+        self._input_name = value
+
+    @property
+    def output_name(self) -> str:
+        return self._output_name
+
+    @output_name.setter
+    def output_name(self, value: str) -> None:
+        self._output_name = value
+
+    @property
+    def input_size(self) -> tuple[int, int]:
+        return (self.input_width, self.input_height)
+
+    @input_size.setter
+    def input_size(self, size: tuple[int, int]) -> None:
+        self.input_width = int(size[0])
+        self.input_height = int(size[1])
+
+    def _load_model(self) -> None:
+        """Initialize ONNX inference session."""
+        global ort
+        if "onnxruntime" in sys.modules:
+            ort = sys.modules["onnxruntime"]
+
+        if ort is None:
+            try:
+                import onnxruntime as _ort
+
+                ort = _ort
+                if ort is None:
+                    raise ImportError("onnxruntime is None")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"onnxruntime is not installed or unavailable: {exc}. "
+                    "Please install onnxruntime or onnxruntime-gpu to use ONNXDetector."
+                ) from exc
+
+        providers = self.providers
         if providers is None:
             available = (
                 ort.get_available_providers()
@@ -394,46 +486,63 @@ class ONNXDetector(Detector):
             if not providers:
                 providers = ["CPUExecutionProvider"]
 
-        self.session = ort.InferenceSession(self.model_path, providers=providers)
-        self.input_name = self.session.get_inputs()[0].name
+        self._session = ort.InferenceSession(self.model_path, providers=providers)
+        inputs = self._session.get_inputs() if hasattr(self._session, "get_inputs") else []
+        if inputs:
+            self._input_name = inputs[0].name
+            input_shape = getattr(inputs[0], "shape", None)
+            if (
+                input_shape
+                and len(input_shape) >= 4
+                and isinstance(input_shape[2], int)
+                and isinstance(input_shape[3], int)
+            ):
+                self.input_height = input_shape[2]
+                self.input_width = input_shape[3]
 
-        # Parse input shape from model metadata
-        input_shape = self.session.get_inputs()[0].shape
-        if (
-            len(input_shape) >= 4
-            and isinstance(input_shape[2], int)
-            and isinstance(input_shape[3], int)
-        ):
-            self.input_height = input_shape[2]
-            self.input_width = input_shape[3]
-        else:
-            self.input_height = 640
-            self.input_width = 640
+        outputs = self._session.get_outputs() if hasattr(self._session, "get_outputs") else []
+        if outputs:
+            self._output_name = getattr(outputs[0], "name", "")
 
-    def predict(self, frame: np.ndarray) -> list[Detection]:
-        """Preprocess frame, run ONNX inference, and parse detection boxes."""
-        if frame is None or frame.size == 0:
-            return []
+    def preprocess(self, frame: np.ndarray) -> np.ndarray:
+        """Preprocess frame using aspect-preserving letterboxing."""
+        self._orig_h, self._orig_w = frame.shape[:2]
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        padded, self._ratio, (self._pad_w, self._pad_h) = letterbox_image(
+            frame, target_shape=(self.input_width, self.input_height)
+        )
+        rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+        tensor = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+        return np.expand_dims(tensor, axis=0)
 
-        orig_h, orig_w = frame.shape[:2]
+    def _inverse_coords(
+        self, x1: float, y1: float, x2: float, y2: float
+    ) -> tuple[float, float, float, float]:
+        """Project letterbox coordinates back to original unpadded frame space."""
+        ratio = self._ratio if self._ratio > 0 else 1.0
+        max_w = float(self._orig_w) if self._orig_w > 0 else float(self.input_width)
+        max_h = float(self._orig_h) if self._orig_h > 0 else float(self.input_height)
+        inv_x1 = float(np.clip((x1 - self._pad_w) / ratio, 0, max_w))
+        inv_y1 = float(np.clip((y1 - self._pad_h) / ratio, 0, max_h))
+        inv_x2 = float(np.clip((x2 - self._pad_w) / ratio, 0, max_w))
+        inv_y2 = float(np.clip((y2 - self._pad_h) / ratio, 0, max_h))
+        return inv_x1, inv_y1, inv_x2, inv_y2
 
-        # Preprocess: resize, BGR -> RGB, HWC -> CHW, normalize to [0, 1]
-        resized = cv2.resize(frame, (self.input_width, self.input_height))
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        tensor = (rgb.transpose(2, 0, 1).astype(np.float32) / 255.0)[np.newaxis, ...]
-
-        outputs = self.session.run(None, {self.input_name: tensor})
+    def postprocess(
+        self, outputs: Sequence[np.ndarray] | list[np.ndarray]
+    ) -> list[Detection]:
+        """Convert ONNX model outputs to Detection objects in original frame coordinates."""
         if not outputs:
             return []
 
         raw = outputs[0]
+        if raw is None or getattr(raw, "size", 0) == 0:
+            return []
+
         if raw.ndim == 3 and raw.shape[0] == 1:
             raw = raw[0]
 
-        scale_x = orig_w / float(self.input_width)
-        scale_y = orig_h / float(self.input_height)
-
-        # Check output structure:
         # Case 1: YOLO26 / end-to-end NMS-free format: [N, 6] -> (x1, y1, x2, y2, conf, cls_id)
         if raw.ndim == 2 and (
             raw.shape[1] == 6 or (raw.shape[0] == 6 and raw.shape[1] > 6)
@@ -448,13 +557,20 @@ class ONNXDetector(Detector):
                     continue
 
                 cid = int(cls_id)
+                if self.classes is not None and cid not in self.classes:
+                    continue
                 cname = self.class_names.get(cid, str(cid))
+                inv_x1, inv_y1, inv_x2, inv_y2 = self._inverse_coords(
+                    float(x1), float(y1), float(x2), float(y2)
+                )
+                real_x1, real_x2 = min(inv_x1, inv_x2), max(inv_x1, inv_x2)
+                real_y1, real_y2 = min(inv_y1, inv_y2), max(inv_y1, inv_y2)
                 detections.append(
                     Detection(
-                        x1=float(x1 * scale_x),
-                        y1=float(y1 * scale_y),
-                        x2=float(x2 * scale_x),
-                        y2=float(y2 * scale_y),
+                        x1=real_x1,
+                        y1=real_y1,
+                        x2=real_x2,
+                        y2=real_y2,
                         confidence=float(conf),
                         class_id=cid,
                         class_name=cname,
@@ -489,10 +605,19 @@ class ONNXDetector(Detector):
                 if best_conf < self.conf_threshold:
                     continue
 
-                real_x1 = max(0.0, float((cx - w / 2.0) * scale_x))
-                real_y1 = max(0.0, float((cy - h / 2.0) * scale_y))
-                real_x2 = min(float(orig_w), float((cx + w / 2.0) * scale_x))
-                real_y2 = min(float(orig_h), float((cy + h / 2.0) * scale_y))
+                if self.classes is not None and best_cls not in self.classes:
+                    continue
+
+                box_x1 = float(cx - w / 2.0)
+                box_y1 = float(cy - h / 2.0)
+                box_x2 = float(cx + w / 2.0)
+                box_y2 = float(cy + h / 2.0)
+
+                inv_x1, inv_y1, inv_x2, inv_y2 = self._inverse_coords(
+                    box_x1, box_y1, box_x2, box_y2
+                )
+                real_x1, real_x2 = min(inv_x1, inv_x2), max(inv_x1, inv_x2)
+                real_y1, real_y2 = min(inv_y1, inv_y2), max(inv_y1, inv_y2)
 
                 candidate_detections.append(
                     Detection(
@@ -522,7 +647,7 @@ class ONNXDetector(Detector):
                 nms_boxes,
                 nms_scores,
                 self.conf_threshold,
-                self.iou_threshold,
+                self.nms_iou_threshold,
             )
 
             results: list[Detection] = []
@@ -532,3 +657,18 @@ class ONNXDetector(Detector):
             return results
 
         return []
+
+    def predict(self, frame: np.ndarray) -> list[Detection]:
+        """Preprocess frame, run ONNX inference, and parse detection boxes."""
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return []
+
+        if self._session is None:
+            self._load_model()
+
+        tensor = self.preprocess(frame)
+        outputs = self._session.run(None, {self._input_name: tensor})
+        if not outputs:
+            return []
+
+        return self.postprocess(outputs)
