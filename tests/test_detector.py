@@ -648,11 +648,13 @@ def test_onnx_detector_cpu_thread_options(monkeypatch):
 
     assert mock_ort.SessionOptions.called
     assert mock_session_options.intra_op_num_threads > 0
-
-
-
-
-
-
+    assert (
+        mock_session_options.graph_optimization_level
+        == mock_ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    )
+    # Check sess_options was passed into InferenceSession
+    call_args = mock_ort.InferenceSession.call_args
+    assert call_args is not None
+    assert call_args.kwargs.get("sess_options") == mock_session_options
 
 
