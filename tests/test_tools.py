@@ -12,17 +12,23 @@ def test_export_yolo_arg_parser():
     assert args.output == "models/custom.onnx"
     assert args.imgsz == 640
     assert args.opset == 17
-    assert args.no_simplify is False
+    assert args.simplify is True
+
+    args_no_simp = parse_args(["--no-simplify"])
+    assert args_no_simp.simplify is False
+
+    args_simp = parse_args(["--simplify"])
+    assert args_simp.simplify is True
 
     args_default = parse_args([])
     assert args_default.model == "yolov8n.pt"
     assert args_default.output == "models/yolov8n.onnx"
     assert args_default.imgsz == 640
     assert args_default.opset == 17
-    assert args_default.no_simplify is False
+    assert args_default.simplify is True
 
     args_no_simplify = parse_args(["--no-simplify"])
-    assert args_no_simplify.no_simplify is True
+    assert args_no_simplify.simplify is False
 
 
 def test_export_yolo_to_onnx_mocked(tmp_path):

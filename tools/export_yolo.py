@@ -12,7 +12,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=str, default="models/yolov8n.onnx", help="Destination path for .onnx file")
     parser.add_argument("--imgsz", type=int, default=640, help="Input image dimension (default: 640)")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version (default: 17)")
-    parser.add_argument("--no-simplify", action="store_true", help="Disable onnx graph simplification")
+    parser.add_argument(
+        "--simplify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable onnx graph simplification (default: enabled)",
+    )
     return parser.parse_args(args)
 
 
@@ -50,14 +55,14 @@ def export_yolo_to_onnx(
     return str(out_dest)
 
 
-def main() -> None:
-    args = parse_args()
+def main(args: list[str] | None = None) -> None:
+    parsed = parse_args(args)
     export_yolo_to_onnx(
-        model_name=args.model,
-        output_path=args.output,
-        imgsz=args.imgsz,
-        opset=args.opset,
-        simplify=not args.no_simplify,
+        model_name=parsed.model,
+        output_path=parsed.output,
+        imgsz=parsed.imgsz,
+        opset=parsed.opset,
+        simplify=bool(parsed.simplify),
     )
 
 
