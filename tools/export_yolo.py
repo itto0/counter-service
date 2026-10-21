@@ -2,8 +2,19 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 from pathlib import Path
+import shutil
+import sys
+
+# Ensure counter root and monorepo root are in sys.path when script is executed directly
+counter_root = Path(__file__).resolve().parent.parent
+monorepo_root = counter_root.parent.parent
+
+if str(counter_root) not in sys.path:
+    sys.path.insert(0, str(counter_root))
+
+if monorepo_root.is_dir() and str(monorepo_root) not in sys.path:
+    sys.path.append(str(monorepo_root))
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
