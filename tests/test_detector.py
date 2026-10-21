@@ -700,10 +700,12 @@ def test_load_model_accuracy_pct(tmp_path):
     (tmp_path / "model4_metrics.json").write_text('{"metrics": {"map50": 92.4}}', encoding="utf-8")
     assert load_model_accuracy_pct(model_file_4) == 92.40
 
-    # Malformed / empty json returns None gracefully
-    corrupt_file = tmp_path / "corrupt.onnx"
+    # Malformed / empty json returns None gracefully when no valid fallback exists
+    corrupt_dir = tmp_path / "corrupt_sub"
+    corrupt_dir.mkdir()
+    corrupt_file = corrupt_dir / "corrupt.onnx"
     corrupt_file.touch()
-    (tmp_path / "corrupt_metrics.json").write_text("invalid json", encoding="utf-8")
+    (corrupt_dir / "corrupt_metrics.json").write_text("invalid json", encoding="utf-8")
     assert load_model_accuracy_pct(str(corrupt_file)) is None
 
     # Out of bounds clamping: high values clamped to 100.0
@@ -734,20 +736,38 @@ def test_load_model_accuracy_pct(tmp_path):
     assert load_model_accuracy_pct(model_low_3) == 0.0
 
     # Boolean values are safely ignored (bool is subclass of int in Python)
-    model_bool_1 = tmp_path / "model_bool_1.onnx"
+    bool_dir = tmp_path / "bool_tests"
+    bool_dir.mkdir()
+    model_bool_1 = bool_dir / "model_bool_1.onnx"
     model_bool_1.touch()
-    (tmp_path / "model_bool_1_metrics.json").write_text('{"metrics": {"map50": true}}', encoding="utf-8")
+    (bool_dir / "model_bool_1_metrics.json").write_text('{"metrics": {"map50": true}}', encoding="utf-8")
     assert load_model_accuracy_pct(model_bool_1) is None
 
-    model_bool_2 = tmp_path / "model_bool_2.onnx"
+    model_bool_2 = bool_dir / "model_bool_2.onnx"
     model_bool_2.touch()
-    (tmp_path / "model_bool_2_metrics.json").write_text('{"metrics": {"map50": false}}', encoding="utf-8")
+    (bool_dir / "model_bool_2_metrics.json").write_text('{"metrics": {"map50": false}}', encoding="utf-8")
     assert load_model_accuracy_pct(model_bool_2) is None
 
     # Boolean map50 ignored with fallback to valid map
-    model_bool_fallback = tmp_path / "model_bool_fallback.onnx"
+    model_bool_fallback = bool_dir / "model_bool_fallback.onnx"
     model_bool_fallback.touch()
-    (tmp_path / "model_bool_fallback_metrics.json").write_text(
+    (bool_dir / "model_bool_fallback_metrics.json").write_text(
         '{"metrics": {"map50": true, "map": 0.85}}', encoding="utf-8"
     )
     assert load_model_accuracy_pct(model_bool_fallback) == 85.0
+
+    # NaN / Inf ignored
+    nan_dir = tmp_path / "nan_tests"
+    nan_dir.mkdir()
+    model_nan = nan_dir / "model_nan.onnx"
+    model_nan.touch()
+    (nan_dir / "model_nan_metrics.json").write_text('{"metrics": {"map50": NaN}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_nan) is None
+
+    # Corrupt specific file falls back to val_metrics.json
+    model_corrupt_fb = tmp_path / "model_cfb.onnx"
+    model_corrupt_fb.touch()
+    (tmp_path / "model_cfb_metrics.json").write_text("corrupted json", encoding="utf-8")
+    (tmp_path / "val_metrics.json").write_text('{"metrics": {"map50": 0.892}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_corrupt_fb) == 89.20
+

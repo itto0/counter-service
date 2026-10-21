@@ -707,24 +707,28 @@ def load_model_accuracy_pct(model_path: str | Path | None) -> float | None:
     specific = path.parent / f"{path.stem}_metrics.json"
     fallback = path.parent / "val_metrics.json"
 
-    target_file = specific if specific.is_file() else (fallback if fallback.is_file() else None)
-    if not target_file:
-        return None
+    candidates = [specific, fallback]
+    for cand in candidates:
+        if not cand.is_file():
+            continue
+        try:
+            import math
 
-    try:
-        data = json.loads(target_file.read_text(encoding="utf-8"))
-        metrics = data.get("metrics", data) if isinstance(data, dict) else {}
-        raw_acc = metrics.get("map50")
-        if not (isinstance(raw_acc, (int, float)) and not isinstance(raw_acc, bool)):
-            raw_acc = metrics.get("map")
+            data = json.loads(cand.read_text(encoding="utf-8"))
+            metrics = data.get("metrics", data) if isinstance(data, dict) else {}
+            raw_acc = metrics.get("map50")
+            if not (isinstance(raw_acc, (int, float)) and not isinstance(raw_acc, bool)):
+                raw_acc = metrics.get("map")
 
-        if isinstance(raw_acc, (int, float)) and not isinstance(raw_acc, bool):
-            val = float(raw_acc)
-            # Convert [0.0, 1.0] to percentage if needed
-            pct = val * 100.0 if 0.0 <= val <= 1.0 else val
-            return round(max(0.0, min(100.0, pct)), 2)
-    except Exception:
-        return None
+            if isinstance(raw_acc, (int, float)) and not isinstance(raw_acc, bool):
+                val = float(raw_acc)
+                if not math.isfinite(val):
+                    continue
+                # Convert [0.0, 1.0] to percentage if needed
+                pct = val * 100.0 if 0.0 <= val <= 1.0 else val
+                return round(max(0.0, min(100.0, pct)), 2)
+        except Exception:
+            continue
 
     return None
 
