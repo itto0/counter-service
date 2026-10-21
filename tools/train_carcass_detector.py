@@ -340,10 +340,10 @@ def format_metrics_summary(metrics: dict[str, float]) -> str:
     Returns:
         Formatted multi-line text banner.
     """
-    map50 = metrics.get("map50", 0.0)
-    map50_95 = metrics.get("map50_95", 0.0)
-    precision = metrics.get("precision", 0.0)
-    recall = metrics.get("recall", 0.0)
+    map50 = float(metrics.get("map50") or 0.0)
+    map50_95 = float(metrics.get("map50_95") or 0.0)
+    precision = float(metrics.get("precision") or 0.0)
+    recall = float(metrics.get("recall") or 0.0)
 
     lines = [
         "=" * 60,

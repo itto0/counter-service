@@ -254,6 +254,16 @@ def test_format_metrics_summary_empty():
     assert "Recall       : 0.0000 (0.00%)" in summary
 
 
+def test_format_metrics_summary_none_values():
+    summary = format_metrics_summary(
+        {"map50": None, "map50_95": None, "precision": None, "recall": None}
+    )
+    assert "mAP@50       : 0.0000 (0.00%)" in summary
+    assert "mAP@50-95    : 0.0000 (0.00%)" in summary
+    assert "Precision    : 0.0000 (0.00%)" in summary
+    assert "Recall       : 0.0000 (0.00%)" in summary
+
+
 def test_train_carcass_detector_pipeline_mocked(tmp_path):
     work_dir = tmp_path / "train_work"
     output_model = str(tmp_path / "models" / "carcass.onnx")
