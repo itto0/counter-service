@@ -714,8 +714,11 @@ def load_model_accuracy_pct(model_path: str | Path | None) -> float | None:
     try:
         data = json.loads(target_file.read_text(encoding="utf-8"))
         metrics = data.get("metrics", data) if isinstance(data, dict) else {}
-        raw_acc = metrics.get("map50", metrics.get("map"))
-        if raw_acc is not None:
+        raw_acc = metrics.get("map50")
+        if not (isinstance(raw_acc, (int, float)) and not isinstance(raw_acc, bool)):
+            raw_acc = metrics.get("map")
+
+        if isinstance(raw_acc, (int, float)) and not isinstance(raw_acc, bool):
             val = float(raw_acc)
             # Convert [0.0, 1.0] to percentage if needed
             pct = val * 100.0 if 0.0 <= val <= 1.0 else val

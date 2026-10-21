@@ -706,5 +706,48 @@ def test_load_model_accuracy_pct(tmp_path):
     (tmp_path / "corrupt_metrics.json").write_text("invalid json", encoding="utf-8")
     assert load_model_accuracy_pct(str(corrupt_file)) is None
 
+    # Out of bounds clamping: high values clamped to 100.0
+    model_high_1 = tmp_path / "model_high_1.onnx"
+    model_high_1.touch()
+    (tmp_path / "model_high_1_metrics.json").write_text('{"metrics": {"map50": 150.0}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_high_1) == 100.0
 
+    model_high_2 = tmp_path / "model_high_2.onnx"
+    model_high_2.touch()
+    (tmp_path / "model_high_2_metrics.json").write_text('{"metrics": {"map50": 120.0}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_high_2) == 100.0
 
+    # Out of bounds clamping: low values clamped to 0.0
+    model_low_1 = tmp_path / "model_low_1.onnx"
+    model_low_1.touch()
+    (tmp_path / "model_low_1_metrics.json").write_text('{"metrics": {"map50": -10.0}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_low_1) == 0.0
+
+    model_low_2 = tmp_path / "model_low_2.onnx"
+    model_low_2.touch()
+    (tmp_path / "model_low_2_metrics.json").write_text('{"metrics": {"map50": -5.0}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_low_2) == 0.0
+
+    model_low_3 = tmp_path / "model_low_3.onnx"
+    model_low_3.touch()
+    (tmp_path / "model_low_3_metrics.json").write_text('{"metrics": {"map50": -0.2}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_low_3) == 0.0
+
+    # Boolean values are safely ignored (bool is subclass of int in Python)
+    model_bool_1 = tmp_path / "model_bool_1.onnx"
+    model_bool_1.touch()
+    (tmp_path / "model_bool_1_metrics.json").write_text('{"metrics": {"map50": true}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_bool_1) is None
+
+    model_bool_2 = tmp_path / "model_bool_2.onnx"
+    model_bool_2.touch()
+    (tmp_path / "model_bool_2_metrics.json").write_text('{"metrics": {"map50": false}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_bool_2) is None
+
+    # Boolean map50 ignored with fallback to valid map
+    model_bool_fallback = tmp_path / "model_bool_fallback.onnx"
+    model_bool_fallback.touch()
+    (tmp_path / "model_bool_fallback_metrics.json").write_text(
+        '{"metrics": {"map50": true, "map": 0.85}}', encoding="utf-8"
+    )
+    assert load_model_accuracy_pct(model_bool_fallback) == 85.0

@@ -203,11 +203,6 @@ class CounterService:
         # Detector
         self.detector = detector or MockDetector(min_confidence=0.8)
 
-        try:
-            from src.detection.detector import load_model_accuracy_pct
-        except ImportError:
-            from detection.detector import load_model_accuracy_pct
-
         model_path = getattr(self.detector, "model_path", None)
         self.model_accuracy_pct = load_model_accuracy_pct(model_path)
         if self.model_accuracy_pct is not None:
