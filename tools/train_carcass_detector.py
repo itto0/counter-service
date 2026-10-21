@@ -291,6 +291,45 @@ def create_dataset_structure(
     return str(yaml_path)
 
 
+def evaluate_trained_model(
+    model_path: str | Path,
+    yaml_path: str | Path,
+    imgsz: int = 640,
+) -> dict[str, float]:
+    """Evaluate trained YOLO checkpoint on validation split and return accuracy metrics.
+
+    Args:
+        model_path: Path to YOLO weights checkpoint (.pt).
+        yaml_path: Path to dataset.yaml.
+        imgsz: Evaluation image resolution.
+
+    Returns:
+        Dictionary containing map50, map50_95, precision, and recall metrics.
+    """
+    try:
+        from ultralytics import YOLO
+    except ImportError:
+        raise ImportError(
+            "ultralytics is required for evaluating models. Install with: pip install ultralytics"
+        )
+
+    model = YOLO(str(model_path))
+    val_results = model.val(data=str(yaml_path), imgsz=imgsz, split="val")
+
+    box = getattr(val_results, "box", None)
+    map50 = float(getattr(box, "map50", 0.0) or 0.0) if box is not None else 0.0
+    map50_95 = float(getattr(box, "map", 0.0) or 0.0) if box is not None else 0.0
+    precision = float(getattr(box, "mp", 0.0) or 0.0) if box is not None else 0.0
+    recall = float(getattr(box, "mr", 0.0) or 0.0) if box is not None else 0.0
+
+    return {
+        "map50": round(map50, 4),
+        "map50_95": round(map50_95, 4),
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+    }
+
+
 def train_carcass_detector(
     video_path: str = "samples/Rekaman_2.MOV",
     num_frames: int = 60,

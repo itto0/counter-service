@@ -12,6 +12,7 @@ from tools.train_carcass_detector import (
     auto_label_frame,
     create_dataset_structure,
     train_carcass_detector,
+    evaluate_trained_model,
     main as train_main,
 )
 
@@ -335,4 +336,62 @@ def test_train_carcass_detector_main_cli():
                 work_dir="work",
                 imgsz=320,
             )
+
+
+def test_evaluate_trained_model_success():
+    from tools.train_carcass_detector import evaluate_trained_model
+
+    mock_box = MagicMock()
+    mock_box.map50 = 0.9421
+    mock_box.map = 0.7615
+    mock_box.mp = 0.9150
+    mock_box.mr = 0.8872
+
+    mock_val_res = MagicMock()
+    mock_val_res.box = mock_box
+
+    mock_yolo_instance = MagicMock()
+    mock_yolo_instance.val.return_value = mock_val_res
+    mock_yolo_cls = MagicMock(return_value=mock_yolo_instance)
+
+    with patch.dict("sys.modules", {"ultralytics": MagicMock(YOLO=mock_yolo_cls)}):
+        metrics = evaluate_trained_model("best.pt", "dataset.yaml", imgsz=640)
+
+    assert metrics == {
+        "map50": 0.9421,
+        "map50_95": 0.7615,
+        "precision": 0.9150,
+        "recall": 0.8872,
+    }
+    mock_yolo_cls.assert_called_once_with("best.pt")
+    mock_yolo_instance.val.assert_called_once_with(data="dataset.yaml", imgsz=640, split="val")
+
+
+def test_evaluate_trained_model_missing_attrs():
+    from tools.train_carcass_detector import evaluate_trained_model
+
+    mock_val_res = MagicMock(spec=[])
+    mock_yolo_instance = MagicMock()
+    mock_yolo_instance.val.return_value = mock_val_res
+    mock_yolo_cls = MagicMock(return_value=mock_yolo_instance)
+
+    with patch.dict("sys.modules", {"ultralytics": MagicMock(YOLO=mock_yolo_cls)}):
+        metrics = evaluate_trained_model("best.pt", "dataset.yaml", imgsz=640)
+
+    assert metrics == {
+        "map50": 0.0,
+        "map50_95": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+    }
+
+
+def test_evaluate_trained_model_missing_ultralytics():
+    from tools.train_carcass_detector import evaluate_trained_model
+
+    with patch.dict("sys.modules", {"ultralytics": None}):
+        with pytest.raises(ImportError) as exc_info:
+            evaluate_trained_model("best.pt", "dataset.yaml")
+        assert "ultralytics is required" in str(exc_info.value)
+
 
