@@ -771,3 +771,16 @@ def test_load_model_accuracy_pct(tmp_path):
     (tmp_path / "val_metrics.json").write_text('{"metrics": {"map50": 0.892}}', encoding="utf-8")
     assert load_model_accuracy_pct(model_corrupt_fb) == 89.20
 
+
+def test_production_model_companion_metrics_file():
+    """Verify production ONNX model has a companion metrics file that loads valid accuracy."""
+    from pathlib import Path
+    from src.detection.detector import load_model_accuracy_pct
+
+    model_path = Path("models/carcass_yolov8n.onnx")
+    if model_path.exists():
+        acc = load_model_accuracy_pct(model_path)
+        assert acc is not None
+        assert 90.0 <= acc <= 100.0
+
+
