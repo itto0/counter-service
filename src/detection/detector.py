@@ -2,7 +2,9 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import json
 import os
+from pathlib import Path
 import sys
 from typing import Any, Sequence
 import cv2
@@ -20,6 +22,7 @@ __all__ = [
     "ONNXDetector",
     "ShackleDetector",
     "letterbox_image",
+    "load_model_accuracy_pct",
 ]
 
 
@@ -682,3 +685,43 @@ class ONNXDetector(Detector):
 
     # Alias for API uniformity
     detect = predict
+
+
+def load_model_accuracy_pct(model_path: str | Path | None) -> float | None:
+    """Discover and parse model accuracy percentage from companion metrics JSON file.
+
+    Args:
+        model_path: File path to the detection model (e.g. models/carcass_yolov8n.onnx).
+
+    Returns:
+        Accuracy percentage in range [0.0, 100.0] or None if metrics cannot be discovered.
+    """
+    if not model_path:
+        return None
+
+    try:
+        path = Path(model_path)
+    except Exception:
+        return None
+
+    specific = path.parent / f"{path.stem}_metrics.json"
+    fallback = path.parent / "val_metrics.json"
+
+    target_file = specific if specific.is_file() else (fallback if fallback.is_file() else None)
+    if not target_file:
+        return None
+
+    try:
+        data = json.loads(target_file.read_text(encoding="utf-8"))
+        metrics = data.get("metrics", data) if isinstance(data, dict) else {}
+        raw_acc = metrics.get("map50", metrics.get("map"))
+        if raw_acc is not None:
+            val = float(raw_acc)
+            # Convert [0.0, 1.0] to percentage if needed
+            pct = val * 100.0 if 0.0 <= val <= 1.0 else val
+            return round(max(0.0, min(100.0, pct)), 2)
+    except Exception:
+        return None
+
+    return None
+

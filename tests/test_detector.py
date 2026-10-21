@@ -659,3 +659,52 @@ def test_onnx_detector_cpu_thread_options(monkeypatch):
     assert call_args.kwargs.get("sess_options") == mock_session_options
 
 
+def test_load_model_accuracy_pct(tmp_path):
+    """Verify load_model_accuracy_pct discovers companion metrics or falls back to None."""
+    from src.detection.detector import load_model_accuracy_pct
+
+    # Non-existent path returns None
+    assert load_model_accuracy_pct(None) is None
+    assert load_model_accuracy_pct("") is None
+    assert load_model_accuracy_pct("non_existent_model.onnx") is None
+
+    # Model with companion carcass_yolov8n_metrics.json
+    model_file = tmp_path / "carcass_yolov8n.onnx"
+    model_file.touch()
+
+    metrics_file = tmp_path / "carcass_yolov8n_metrics.json"
+    metrics_file.write_text('{"metrics": {"map50": 0.9421}}', encoding="utf-8")
+
+    # Supports str path
+    assert load_model_accuracy_pct(str(model_file)) == 94.21
+    # Supports Path object directly
+    assert load_model_accuracy_pct(model_file) == 94.21
+
+    # Model with companion val_metrics.json fallback
+    model_file_2 = tmp_path / "model2.onnx"
+    model_file_2.touch()
+    metrics_file_2 = tmp_path / "val_metrics.json"
+    metrics_file_2.write_text('{"metrics": {"map50": 0.885}}', encoding="utf-8")
+
+    assert load_model_accuracy_pct(str(model_file_2)) == 88.50
+
+    # Flat JSON without top-level 'metrics' key and fallback to 'map'
+    model_file_3 = tmp_path / "model3.onnx"
+    model_file_3.touch()
+    (tmp_path / "model3_metrics.json").write_text('{"map": 0.9123}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_file_3) == 91.23
+
+    # Already percentage value in [0, 100]
+    model_file_4 = tmp_path / "model4.onnx"
+    model_file_4.touch()
+    (tmp_path / "model4_metrics.json").write_text('{"metrics": {"map50": 92.4}}', encoding="utf-8")
+    assert load_model_accuracy_pct(model_file_4) == 92.40
+
+    # Malformed / empty json returns None gracefully
+    corrupt_file = tmp_path / "corrupt.onnx"
+    corrupt_file.touch()
+    (tmp_path / "corrupt_metrics.json").write_text("invalid json", encoding="utf-8")
+    assert load_model_accuracy_pct(str(corrupt_file)) is None
+
+
+

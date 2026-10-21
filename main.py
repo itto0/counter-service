@@ -48,6 +48,7 @@ try:
         MockDetector,
         ONNXDetector,
         ShackleDetector,
+        load_model_accuracy_pct,
     )
     from src.storage.db import LocalStorage
     from src.sync.dispatcher import OutboxSyncDispatcher
@@ -63,6 +64,7 @@ except ImportError:
         MockDetector,
         ONNXDetector,
         ShackleDetector,
+        load_model_accuracy_pct,
     )
     from src.storage.db import LocalStorage
     from src.sync.dispatcher import OutboxSyncDispatcher
@@ -200,6 +202,16 @@ class CounterService:
 
         # Detector
         self.detector = detector or MockDetector(min_confidence=0.8)
+
+        try:
+            from src.detection.detector import load_model_accuracy_pct
+        except ImportError:
+            from detection.detector import load_model_accuracy_pct
+
+        model_path = getattr(self.detector, "model_path", None)
+        self.model_accuracy_pct = load_model_accuracy_pct(model_path)
+        if self.model_accuracy_pct is not None:
+            logger.info("Loaded model accuracy: %.2f%% from companion metrics", self.model_accuracy_pct)
 
         # Tracker / Counter
         if counter is not None:
@@ -358,10 +370,11 @@ class CounterService:
             cpu_pct=round(min(100.0, max(0.0, cpu_pct)), 1),
             mem_pct=round(min(100.0, max(0.0, mem_pct)), 1),
             stream_state=stream_state,
-            model_name=getattr(self.detector, "model_name", "yolo26n")
-            if hasattr(self.detector, "model_name")
+            model_name=self.detector.model_name
+            if hasattr(self.detector, "model_name") and isinstance(self.detector.model_name, str)
             else "yolo26n",
             model_version="v1.0",
+            accuracy_pct=self.model_accuracy_pct,
         )
         try:
             self.storage.insert_health(self.line_id, health)

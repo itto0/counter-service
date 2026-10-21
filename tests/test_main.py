@@ -809,3 +809,54 @@ def test_detector_selection_onnx_fallback_to_mock(monkeypatch):
 
         mock_mock_cls.assert_called_once()
         assert mock_service_cls.call_args.kwargs.get("detector") == mock_mock_cls.return_value
+
+
+def test_counter_service_records_health_with_accuracy_pct(tmp_path):
+    """Verify CounterService discovers model accuracy and records accuracy_pct in health samples."""
+    db_file = str(tmp_path / "test_health_acc.db")
+    storage = LocalStorage(db_path=db_file)
+
+    model_file = tmp_path / "carcass_yolov8n.onnx"
+    model_file.touch()
+    metrics_file = tmp_path / "carcass_yolov8n_metrics.json"
+    metrics_file.write_text('{"metrics": {"map50": 0.9421}}', encoding="utf-8")
+
+    mock_detector = MagicMock()
+    mock_detector.model_name = "carcass_yolov8n"
+    mock_detector.model_path = str(model_file)
+
+    service = CounterService(
+        line_id="lineAcc",
+        storage=storage,
+        detector=mock_detector,
+        enable_sync=False,
+    )
+
+    assert service.model_accuracy_pct == 94.21
+
+    service._record_health()
+
+    unsynced_health = storage.get_unsynced_health(line_id="lineAcc")
+    assert len(unsynced_health) == 1
+    assert unsynced_health[0]["accuracy_pct"] == 94.21
+
+
+def test_counter_service_records_health_accuracy_pct_none_when_no_metrics(tmp_path):
+    """Verify CounterService records accuracy_pct as None when no metrics JSON exists."""
+    db_file = str(tmp_path / "test_health_no_acc.db")
+    storage = LocalStorage(db_path=db_file)
+
+    service = CounterService(
+        line_id="lineNoAcc",
+        storage=storage,
+        enable_sync=False,
+    )
+
+    assert service.model_accuracy_pct is None
+
+    service._record_health()
+
+    unsynced_health = storage.get_unsynced_health(line_id="lineNoAcc")
+    assert len(unsynced_health) == 1
+    assert unsynced_health[0]["accuracy_pct"] is None
+
