@@ -172,6 +172,15 @@ def auto_label_frame(
         else:
             continue
 
+        # Pre-clamp bounding box to image boundaries before calculating normalized centers
+        x1 = max(0.0, min(float(width), x1))
+        y1 = max(0.0, min(float(height), y1))
+        x2 = max(0.0, min(float(width), x2))
+        y2 = max(0.0, min(float(height), y2))
+
+        if x2 <= x1 or y2 <= y1:
+            continue
+
         x_center = ((x1 + x2) / 2.0) / width
         y_center = ((y1 + y2) / 2.0) / height
         w = (x2 - x1) / width
@@ -220,34 +229,41 @@ def create_dataset_structure(
 
     n = len(image_paths)
     if n <= 1:
-        train_count = n
+        # For single-sample datasets, mirror into both train and val so YOLO validation never raises
+        train_indices = set(range(n))
+        val_indices = set(range(n))
     else:
         train_count = int(round(n * train_ratio))
         if train_count >= n:
             train_count = n - 1
         elif train_count < 1:
             train_count = 1
+        train_indices = set(range(train_count))
+        val_indices = set(range(train_count, n))
 
     for idx, (img_path_str, item_labels) in enumerate(zip(image_paths, labels)):
-        is_train = idx < train_count
-        target_img_dir = img_train_dir if is_train else img_val_dir
-        target_lbl_dir = lbl_train_dir if is_train else lbl_val_dir
+        target_dirs = []
+        if idx in train_indices:
+            target_dirs.append((img_train_dir, lbl_train_dir))
+        if idx in val_indices:
+            target_dirs.append((img_val_dir, lbl_val_dir))
 
-        src_img = Path(img_path_str)
-        dst_img = target_img_dir / src_img.name
+        for target_img_dir, target_lbl_dir in target_dirs:
+            src_img = Path(img_path_str)
+            dst_img = target_img_dir / src_img.name
 
-        if src_img.exists():
-            if src_img.resolve() != dst_img.resolve():
-                shutil.copy2(src_img, dst_img)
-        else:
-            dst_img.touch()
+            if src_img.exists():
+                if src_img.resolve() != dst_img.resolve():
+                    shutil.copy2(src_img, dst_img)
+            else:
+                dst_img.touch()
 
-        lbl_file = target_lbl_dir / f"{src_img.stem}.txt"
-        lines = [
-            f"{cid} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n"
-            for cid, xc, yc, w, h in item_labels
-        ]
-        lbl_file.write_text("".join(lines), encoding="utf-8")
+            lbl_file = target_lbl_dir / f"{src_img.stem}.txt"
+            lines = [
+                f"{cid} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n"
+                for cid, xc, yc, w, h in item_labels
+            ]
+            lbl_file.write_text("".join(lines), encoding="utf-8")
 
     yaml_path = base_dir / "dataset.yaml"
     yaml_content = (

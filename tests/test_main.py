@@ -809,11 +809,3 @@ def test_detector_selection_onnx_fallback_to_mock(monkeypatch):
 
         mock_mock_cls.assert_called_once()
         assert mock_service_cls.call_args.kwargs.get("detector") == mock_mock_cls.return_value
-
-
-
-
-
-
-
-

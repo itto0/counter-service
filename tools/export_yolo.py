@@ -52,6 +52,20 @@ def export_yolo_to_onnx(
         shutil.move(exported_file, out_dest)
 
     print(f"Model exported successfully to: {out_dest}")
+
+    # Optional sanity check on exported model using onnxruntime if available
+    try:
+        import numpy as np
+        import onnxruntime as ort
+
+        sess = ort.InferenceSession(str(out_dest), providers=["CPUExecutionProvider"])
+        input_name = sess.get_inputs()[0].name
+        dummy_tensor = np.zeros((1, 3, imgsz, imgsz), dtype=np.float32)
+        sess.run(None, {input_name: dummy_tensor})
+        print(f"ONNX model verified with dummy input shape (1, 3, {imgsz}, {imgsz}).")
+    except Exception as exc:
+        print(f"Note: ONNX runtime verification skipped: {exc}")
+
     return str(out_dest)
 
 

@@ -554,12 +554,9 @@ class ONNXDetector(Detector):
             raw = raw[0]
 
         # Case 1: YOLO26 / end-to-end NMS-free format: [N, 6] -> (x1, y1, x2, y2, conf, cls_id)
-        if raw.ndim == 2 and (
-            raw.shape[1] == 6 or (raw.shape[0] == 6 and raw.shape[1] > 6)
-        ):
-            if raw.shape[0] == 6 and raw.shape[1] > 6:
-                raw = raw.T
-
+        # End-to-end models have 6 columns (x1, y1, x2, y2, conf, cls_id) with candidate cap (N <= 1000).
+        # Note: Raw YOLO models with 2 classes [6, 8400] must not be treated as end-to-end.
+        if raw.ndim == 2 and raw.shape[1] == 6 and raw.shape[0] <= 1000:
             detections: list[Detection] = []
             for row in raw:
                 x1, y1, x2, y2, conf, cls_id = row
