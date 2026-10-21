@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import shutil
 import sys
@@ -330,6 +331,33 @@ def evaluate_trained_model(
     }
 
 
+def format_metrics_summary(metrics: dict[str, float]) -> str:
+    """Format accuracy metrics into a clean console banner string.
+
+    Args:
+        metrics: Dictionary containing map50, map50_95, precision, and recall.
+
+    Returns:
+        Formatted multi-line text banner.
+    """
+    map50 = metrics.get("map50", 0.0)
+    map50_95 = metrics.get("map50_95", 0.0)
+    precision = metrics.get("precision", 0.0)
+    recall = metrics.get("recall", 0.0)
+
+    lines = [
+        "=" * 60,
+        "              YOLO Carcass Detection Accuracy Metrics",
+        "=" * 60,
+        f"  mAP@50       : {map50:.4f} ({map50 * 100:.2f}%)",
+        f"  mAP@50-95    : {map50_95:.4f} ({map50_95 * 100:.2f}%)",
+        f"  Precision    : {precision:.4f} ({precision * 100:.2f}%)",
+        f"  Recall       : {recall:.4f} ({recall * 100:.2f}%)",
+        "=" * 60,
+    ]
+    return "\n".join(lines)
+
+
 def train_carcass_detector(
     video_path: str = "samples/Rekaman_2.MOV",
     num_frames: int = 60,
@@ -339,8 +367,8 @@ def train_carcass_detector(
     work_dir: str = "dataset/carcass",
     imgsz: int = 640,
     detector: Any = None,
-) -> str:
-    """Run end-to-end semi-supervised pipeline: extract frames, auto-label, train YOLO, and export ONNX."""
+) -> dict[str, Any]:
+    """Run end-to-end semi-supervised pipeline: extract frames, auto-label, train YOLO, evaluate, and export ONNX."""
     work_path = Path(work_dir)
     raw_frames_dir = work_path / "raw_frames"
 
@@ -412,19 +440,40 @@ def train_carcass_detector(
         else:
             best_pt = Path(base_model)
 
+    print(f"Evaluating validation accuracy on {best_pt}...")
+    metrics = evaluate_trained_model(best_pt, yaml_path, imgsz=imgsz)
+    print(format_metrics_summary(metrics))
+
     print(f"Exporting best model ({best_pt}) to ONNX ({output_model})...")
     exported_path = export_yolo_to_onnx(
         model_name=str(best_pt),
         output_path=output_model,
         imgsz=imgsz,
     )
-    return exported_path
+
+    metrics_payload = {
+        "best_checkpoint": str(best_pt),
+        "exported_onnx": str(output_model),
+        "metrics": metrics,
+    }
+    val_json_path = work_path / "val_metrics.json"
+    val_json_path.parent.mkdir(parents=True, exist_ok=True)
+    val_json_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+
+    out_json_path = Path(output_model).parent / f"{Path(output_model).stem}_metrics.json"
+    out_json_path.parent.mkdir(parents=True, exist_ok=True)
+    out_json_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+
+    return {
+        "model_path": exported_path,
+        "metrics": metrics,
+    }
 
 
 def main(args: list[str] | None = None) -> None:
     """CLI entrypoint for carcass detector training."""
     parsed = parse_args(args)
-    train_carcass_detector(
+    result = train_carcass_detector(
         video_path=parsed.video,
         num_frames=parsed.frames,
         epochs=parsed.epochs,
@@ -433,6 +482,7 @@ def main(args: list[str] | None = None) -> None:
         work_dir=parsed.work_dir,
         imgsz=parsed.imgsz,
     )
+    print(f"Training and export complete. Model saved to: {result['model_path']}")
 
 
 if __name__ == "__main__":

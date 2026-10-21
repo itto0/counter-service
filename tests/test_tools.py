@@ -1,3 +1,4 @@
+import json
 import pytest
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ from tools.train_carcass_detector import (
     create_dataset_structure,
     train_carcass_detector,
     evaluate_trained_model,
+    format_metrics_summary,
     main as train_main,
 )
 
@@ -234,6 +236,24 @@ def test_extract_keyframes_mocked(tmp_path):
         mock_cap_ok.release.assert_called_once()
 
 
+def test_format_metrics_summary():
+    metrics = {"map50": 0.9421, "map50_95": 0.7615, "precision": 0.915, "recall": 0.8872}
+    summary = format_metrics_summary(metrics)
+    assert "YOLO Carcass Detection Accuracy Metrics" in summary
+    assert "mAP@50       : 0.9421 (94.21%)" in summary
+    assert "mAP@50-95    : 0.7615 (76.15%)" in summary
+    assert "Precision    : 0.9150 (91.50%)" in summary
+    assert "Recall       : 0.8872 (88.72%)" in summary
+
+
+def test_format_metrics_summary_empty():
+    summary = format_metrics_summary({})
+    assert "mAP@50       : 0.0000 (0.00%)" in summary
+    assert "mAP@50-95    : 0.0000 (0.00%)" in summary
+    assert "Precision    : 0.0000 (0.00%)" in summary
+    assert "Recall       : 0.0000 (0.00%)" in summary
+
+
 def test_train_carcass_detector_pipeline_mocked(tmp_path):
     work_dir = tmp_path / "train_work"
     output_model = str(tmp_path / "models" / "carcass.onnx")
@@ -250,11 +270,19 @@ def test_train_carcass_detector_pipeline_mocked(tmp_path):
     mock_best_pt.write_text("weights")
     mock_yolo_inst.trainer.best = str(mock_best_pt)
 
+    expected_metrics = {
+        "map50": 0.9421,
+        "map50_95": 0.7615,
+        "precision": 0.9150,
+        "recall": 0.8872,
+    }
+
     with patch("tools.train_carcass_detector.extract_keyframes", return_value=dummy_images) as mock_extract, \
          patch("cv2.imread", return_value=np.zeros((100, 100, 3), dtype=np.uint8)), \
          patch("tools.train_carcass_detector.auto_label_frame", return_value=[(0, 0.5, 0.5, 0.2, 0.2)]) as mock_label, \
          patch("tools.train_carcass_detector.create_dataset_structure", return_value=str(work_dir / "dataset.yaml")) as mock_create_ds, \
          patch.dict("sys.modules", {"ultralytics": MagicMock(YOLO=mock_yolo_cls)}), \
+         patch("tools.train_carcass_detector.evaluate_trained_model", return_value=expected_metrics) as mock_evaluate, \
          patch("tools.train_carcass_detector.export_yolo_to_onnx", return_value=output_model) as mock_export:
 
         res = train_carcass_detector(
@@ -267,7 +295,10 @@ def test_train_carcass_detector_pipeline_mocked(tmp_path):
             imgsz=320,
         )
 
-        assert res == output_model
+        assert res == {
+            "model_path": output_model,
+            "metrics": expected_metrics,
+        }
         mock_extract.assert_called_once_with("sample.mov", str(work_dir / "raw_frames"), num_frames=2)
         assert mock_label.call_count == 2
         mock_create_ds.assert_called_once()
@@ -279,11 +310,32 @@ def test_train_carcass_detector_pipeline_mocked(tmp_path):
             project=str(work_dir / "runs"),
             name="train",
         )
+        mock_evaluate.assert_called_once_with(
+            mock_best_pt,
+            str(work_dir / "dataset.yaml"),
+            imgsz=320,
+        )
         mock_export.assert_called_once_with(
             model_name=str(mock_best_pt),
             output_path=output_model,
             imgsz=320,
         )
+
+        # Check val_metrics.json persistence
+        val_json_path = work_dir / "val_metrics.json"
+        assert val_json_path.exists()
+        val_data = json.loads(val_json_path.read_text(encoding="utf-8"))
+        assert val_data["best_checkpoint"] == str(mock_best_pt)
+        assert val_data["exported_onnx"] == output_model
+        assert val_data["metrics"] == expected_metrics
+
+        # Check <output_stem>_metrics.json persistence
+        out_json_path = Path(output_model).parent / "carcass_metrics.json"
+        assert out_json_path.exists()
+        out_data = json.loads(out_json_path.read_text(encoding="utf-8"))
+        assert out_data["best_checkpoint"] == str(mock_best_pt)
+        assert out_data["exported_onnx"] == output_model
+        assert out_data["metrics"] == expected_metrics
 
 
 def test_train_carcass_detector_missing_ultralytics(tmp_path):
@@ -326,6 +378,10 @@ def test_train_carcass_detector_main_cli():
     ]
     with patch.object(sys, "argv", test_args):
         with patch("tools.train_carcass_detector.train_carcass_detector") as mock_train:
+            mock_train.return_value = {
+                "model_path": "out.onnx",
+                "metrics": {"map50": 0.9, "map50_95": 0.7, "precision": 0.85, "recall": 0.8},
+            }
             train_main()
             mock_train.assert_called_once_with(
                 video_path="input.mp4",
