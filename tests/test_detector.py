@@ -642,6 +642,7 @@ def test_onnx_detector_cpu_thread_options(monkeypatch):
     mock_session_options = MagicMock()
     mock_ort.SessionOptions.return_value = mock_session_options
     monkeypatch.setattr("src.detection.detector.ort", mock_ort, raising=False)
+    monkeypatch.setitem(sys.modules, "onnxruntime", mock_ort)
 
     detector = ONNXDetector(model_path="dummy.onnx")
     detector._load_model()
