@@ -108,8 +108,8 @@ def extract_keyframes(
             if not ret or frame is None:
                 continue
             file_path = out_path / f"frame_{i:04d}.jpg"
-            cv2.imwrite(str(file_path), frame)
-            saved_paths.append(str(file_path))
+            if cv2.imwrite(str(file_path), frame):
+                saved_paths.append(str(file_path))
 
         return sorted(saved_paths)
     finally:
@@ -287,6 +287,7 @@ def train_carcass_detector(
     for p in image_paths:
         frame = cv2.imread(p)
         if frame is None:
+            print(f"Warning: could not read extracted frame {p}")
             labels.append([])
         else:
             labels.append(auto_label_frame(frame, detector))
