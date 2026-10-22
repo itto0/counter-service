@@ -252,3 +252,26 @@ def test_counter_service_cli_display_idle_tag(tmp_path, capsys):
     assert "[IDLE]" in captured
 
 
+def test_idle_cli_args_parsing():
+    """Verify build_arg_parser accepts --idle-timeout-sec and --idle-fps."""
+    from main import build_arg_parser
+
+    parser = build_arg_parser()
+    args = parser.parse_args(["--idle-timeout-sec", "45.5", "--idle-fps", "2.5"])
+    assert args.idle_timeout_sec == 45.5
+    assert args.idle_fps == 2.5
+
+
+def test_idle_cli_env_fallbacks(monkeypatch):
+    """Verify build_arg_parser respects IDLE_TIMEOUT_SEC and IDLE_FPS env vars."""
+    from main import build_arg_parser
+
+    monkeypatch.setenv("IDLE_TIMEOUT_SEC", "12.0")
+    monkeypatch.setenv("IDLE_FPS", "0.5")
+
+    parser = build_arg_parser()
+    args = parser.parse_args([])
+    assert args.idle_timeout_sec == 12.0
+    assert args.idle_fps == 0.5
+
+

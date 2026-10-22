@@ -1083,6 +1083,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Pace playback to target FPS (e.g. 30.0). 0.0 for unthrottled maximum speed.",
     )
     parser.add_argument(
+        "--idle-timeout-sec",
+        type=float,
+        default=float(os.getenv("IDLE_TIMEOUT_SEC", "30.0")),
+        help="Seconds without detections before entering idle mode (0 to disable, default: 30.0)",
+    )
+    parser.add_argument(
+        "--idle-fps",
+        type=float,
+        default=float(os.getenv("IDLE_FPS", "1.0")),
+        help="Target frame rate during idle mode (default: 1.0)",
+    )
+    parser.add_argument(
         "--show-window",
         "--gui",
         action="store_true",
@@ -1328,6 +1340,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         db_path=args.db_path,
         sync_interval_sec=args.sync_interval,
         target_fps=args.target_fps,
+        idle_timeout_sec=args.idle_timeout_sec,
+        idle_fps=args.idle_fps,
         aggregate_window_sec=args.aggregate_window,
         health_interval_sec=args.health_interval,
         detector=detector,
