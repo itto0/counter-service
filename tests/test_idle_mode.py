@@ -275,3 +275,15 @@ def test_idle_cli_env_fallbacks(monkeypatch):
     assert args.idle_fps == 0.5
 
 
+def test_idle_cli_defaults_when_no_flags_or_env(monkeypatch):
+    """Verify default values (idle_timeout_sec == 30.0, idle_fps == 1.0) when no CLI flags and no environment variables are set."""
+    from main import build_arg_parser
+
+    monkeypatch.delenv("IDLE_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("IDLE_FPS", raising=False)
+
+    parser = build_arg_parser()
+    args = parser.parse_args([])
+    assert args.idle_timeout_sec == 30.0
+    assert args.idle_fps == 1.0
+
