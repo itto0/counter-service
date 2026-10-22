@@ -1,0 +1,31 @@
+services:
+  counter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdc-counter
+    restart: unless-stopped
+    environment:
+      - LINE_ID=${LINE_ID:-line-1}
+      - VIDEO_PATH=${VIDEO_PATH:-/samples/Rekaman_2.MOV}
+      - LOOP_VIDEO=${LOOP_VIDEO:-1}
+      - LINE_DIRECTION=${LINE_DIRECTION:-right}
+      - LINE_COORDS=${LINE_COORDS:-}
+      - TARGET_FPS=${TARGET_FPS:-30.0}
+      - API_SYNC_URL=${API_SYNC_URL:-https://cdc-api.onrender.com/api/v1/sync/batch}
+      - API_TOKEN=${API_TOKEN:-}
+      - DB_PATH=/data/counter_outbox.db
+      - SYNC_INTERVAL_SEC=${SYNC_INTERVAL_SEC:-5.0}
+      - HEALTH_INTERVAL_SEC=${HEALTH_INTERVAL_SEC:-10.0}
+      - CONF_THRESHOLD=${CONF_THRESHOLD:-0.7}
+      - OCCUPANCY_THRESHOLD=${OCCUPANCY_THRESHOLD:-4.5}
+      - ENABLE_STREAM_RELAY=${ENABLE_STREAM_RELAY:-1}
+      - STREAM_FPS=${STREAM_FPS:-10}
+      - MODEL_PATH=${MODEL_PATH:-models/carcass_yolov8n.onnx}
+    volumes:
+      - counter_data:/data
+      - ${SAMPLES_DIR:-./samples}:/samples:ro
+      - ${MODELS_DIR:-./models}:/app/models:ro 
+
+volumes:
+  counter_data:
