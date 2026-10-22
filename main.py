@@ -362,7 +362,7 @@ class CounterService:
         except Exception:
             pass
 
-        if self.is_idle:
+        if self.is_idle and stream_state == "ONLINE":
             stream_state = "IDLE"
         elif stream_state == "ONLINE" and fps < 5.0 and self.total_frames_processed > 0:
             stream_state = "DEGRADED"
@@ -466,6 +466,7 @@ class CounterService:
         self._window_count = 0
         self._window_confidences = []
 
+        self.is_idle = False
         self._health_last_calc_time = now_perf
         self._health_frame_count = 0
         self._health_latencies_ms = []
@@ -515,7 +516,16 @@ class CounterService:
                     if self.is_idle:
                         self.is_idle = False
                         logger.info("Object detected: exiting idle mode, resuming full processing")
-                        if hasattr(self.source, "cap") and self.source.cap is not None:
+                        if self._health_frame_count > 0:
+                            self._record_health(now_det, stream_state="IDLE")
+                        self._health_last_calc_time = now_det
+                        self._health_frame_count = 0
+                        self._health_latencies_ms = []
+                        if (
+                            self.video_source_type in ("rtsp", "camera", "live", "webcam")
+                            and hasattr(self.source, "cap")
+                            and self.source.cap is not None
+                        ):
                             try:
                                 for _ in range(2):
                                     self.source.cap.grab()
@@ -543,7 +553,7 @@ class CounterService:
                     self._window_confidences.append(ev.confidence)
                     if self.cli_display:
                         # Clear in-place line and print count event
-                        sys.stdout.write("\r" + " " * 80 + "\r")
+                        sys.stdout.write("\r" + " " * 100 + "\r")
                         print(
                             f" [COUNT +1] Frame #{self.total_frames_processed:<5d} | "
                             f"Track #{ev.track_id:<3d} | "
@@ -1085,13 +1095,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--idle-timeout-sec",
         type=float,
-        default=float(os.getenv("IDLE_TIMEOUT_SEC", "30.0")),
+        default=float(os.getenv("IDLE_TIMEOUT_SEC") or "30.0"),
         help="Seconds without detections before entering idle mode (0 to disable, default: 30.0)",
     )
     parser.add_argument(
         "--idle-fps",
         type=float,
-        default=float(os.getenv("IDLE_FPS", "1.0")),
+        default=float(os.getenv("IDLE_FPS") or "1.0"),
         help="Target frame rate during idle mode (default: 1.0)",
     )
     parser.add_argument(
