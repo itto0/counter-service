@@ -362,7 +362,9 @@ class CounterService:
         except Exception:
             pass
 
-        if stream_state == "ONLINE" and fps < 5.0 and self.total_frames_processed > 0:
+        if self.is_idle:
+            stream_state = "IDLE"
+        elif stream_state == "ONLINE" and fps < 5.0 and self.total_frames_processed > 0:
             stream_state = "DEGRADED"
 
         health = HealthSampleDTO(
@@ -468,6 +470,7 @@ class CounterService:
         self._health_frame_count = 0
         self._health_latencies_ms = []
         self._all_latencies_ms = []
+        self._last_detection_time = now_perf
 
         last_progress_print = 0.0
 
@@ -605,8 +608,9 @@ class CounterService:
                     curr_fps = self.total_frames_processed / elapsed_total
                     curr_rate = self.counter.total_count * (60.0 / elapsed_total)
                     recent_lat = self._all_latencies_ms[-1] if self._all_latencies_ms else 0.0
+                    idle_tag = " [IDLE]" if self.is_idle else ""
                     sys.stdout.write(
-                        f"\r[Frame {self.total_frames_processed:5d}] "
+                        f"\r[Frame {self.total_frames_processed:5d}{idle_tag}] "
                         f"Chickens: {self.counter.total_count:4d} | "
                         f"Rate: {curr_rate:5.1f}/min | "
                         f"Speed: {curr_fps:5.1f} fps | "
@@ -615,9 +619,10 @@ class CounterService:
                     sys.stdout.flush()
 
                 # Optional frame rate pacing
-                if self.target_fps > 0:
+                effective_fps = self.idle_fps if self.is_idle else self.target_fps
+                if effective_fps > 0:
                     elapsed = time.perf_counter() - frame_start
-                    delay = (1.0 / self.target_fps) - elapsed
+                    delay = (1.0 / effective_fps) - elapsed
                     if delay > 0:
                         if self.show_window:
                             try:

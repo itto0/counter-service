@@ -153,3 +153,102 @@ def test_counter_service_run_loop_idle_transition_and_wake_up(tmp_path):
     assert service.is_idle is False
     # Camera buffer grab should have been called 2 times on wake up
     assert mock_source.cap.grab.call_count == 2
+
+
+def test_counter_service_records_idle_health(tmp_path):
+    """Verify _record_health records stream_state='IDLE' when service is idle even if fps < 5.0."""
+    db_file = str(tmp_path / "test_idle_health.db")
+    storage = LocalStorage(db_path=db_file)
+    service = CounterService(
+        line_id="lineIdleHealth",
+        storage=storage,
+        cli_display=False,
+    )
+    service.total_frames_processed = 10
+    service.is_idle = True
+    service._health_frame_count = 1  # Low frame count -> FPS would normally be < 5.0
+    service._health_last_calc_time = time.perf_counter() - 1.0
+
+    service._record_health()
+
+    samples = storage.get_unsynced_health(line_id="lineIdleHealth")
+    assert len(samples) == 1
+    assert samples[0]["stream_state"] == "IDLE"
+
+
+def test_counter_service_disabled_idle_mode(tmp_path):
+    """Verify idle_timeout_sec=0.0 disables idle mode transitions."""
+    db_file = str(tmp_path / "test_idle_disabled.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_source = MagicMock()
+    import numpy as np
+    mock_source.read.return_value = (True, np.zeros((480, 640, 3), dtype=np.uint8))
+    mock_detector = MagicMock()
+    mock_detector.predict.return_value = []
+
+    service = CounterService(
+        line_id="lineIdleDisabled",
+        source=mock_source,
+        detector=mock_detector,
+        storage=storage,
+        idle_timeout_sec=0.0,  # Disabled
+        cli_display=False,
+    )
+    service.run(max_frames=5)
+    assert service.is_idle is False
+
+
+def test_counter_service_idle_pacing_delay(tmp_path, monkeypatch):
+    """Verify frame pacing uses idle_fps when is_idle is True."""
+    db_file = str(tmp_path / "test_idle_pacing.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_source = MagicMock()
+    import numpy as np
+    mock_source.read.return_value = (True, np.zeros((480, 640, 3), dtype=np.uint8))
+    mock_detector = MagicMock()
+    mock_detector.predict.return_value = []
+
+    sleep_calls = []
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
+
+    service = CounterService(
+        line_id="lineIdlePacing",
+        source=mock_source,
+        detector=mock_detector,
+        storage=storage,
+        target_fps=30.0,
+        idle_fps=2.0,
+        idle_timeout_sec=10.0,
+        cli_display=False,
+    )
+    service.is_idle = True
+    service.run(max_frames=1)
+
+    assert len(sleep_calls) >= 1
+    assert sleep_calls[0] > 0.4
+
+
+def test_counter_service_cli_display_idle_tag(tmp_path, capsys):
+    """Verify CLI display output includes [IDLE] tag when service is idle."""
+    db_file = str(tmp_path / "test_idle_cli.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_source = MagicMock()
+    import numpy as np
+    mock_source.read.return_value = (True, np.zeros((480, 640, 3), dtype=np.uint8))
+    mock_detector = MagicMock()
+    mock_detector.predict.return_value = []
+
+    service = CounterService(
+        line_id="lineIdleCLI",
+        source=mock_source,
+        detector=mock_detector,
+        storage=storage,
+        cli_display=True,
+    )
+    service.is_idle = True
+    service.run(max_frames=1)
+
+    captured = capsys.readouterr().out
+    assert "[IDLE]" in captured
+
+
