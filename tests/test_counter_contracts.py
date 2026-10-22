@@ -82,6 +82,19 @@ def test_health_sample_dto_accuracy_pct():
         )
 
 
+def test_health_sample_dto_idle_stream_state():
+    from src.contracts import HealthSampleDTO
+
+    health = HealthSampleDTO(
+        fps=1.0,
+        latency_p95_ms=8.0,
+        cpu_pct=5.0,
+        mem_pct=15.0,
+        stream_state="IDLE",
+    )
+    assert health.stream_state == "IDLE"
+
+
 def test_standalone_env_init():
     from src.env import init_env
 
