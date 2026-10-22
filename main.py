@@ -118,6 +118,8 @@ class CounterService:
         enable_stream_relay: bool = True,
         stream_fps: float = 4.0,
         stream_uploader: Optional[Any] = None,
+        idle_timeout_sec: float = 30.0,
+        idle_fps: float = 1.0,
     ) -> None:
         self.line_id = line_id
         self.video_source_type = video_source_type.lower()
@@ -141,6 +143,10 @@ class CounterService:
         self.enable_stream_relay = enable_stream_relay
         self.stream_fps = stream_fps
         self.stream_uploader = stream_uploader
+        self.idle_timeout_sec = idle_timeout_sec
+        self.idle_fps = idle_fps
+        self.is_idle = False
+        self._last_detection_time = time.perf_counter()
 
         if self.stream_uploader is None and self.enable_stream_relay and LiveStreamUploader is not None:
             if self.api_sync_url and "/api/v1" in self.api_sync_url:
@@ -499,6 +505,27 @@ class CounterService:
                 # 1. Detect
                 t0 = time.perf_counter()
                 detections = self.detector.predict(frame)
+
+                now_det = time.perf_counter()
+                if len(detections) > 0:
+                    self._last_detection_time = now_det
+                    if self.is_idle:
+                        self.is_idle = False
+                        logger.info("Object detected: exiting idle mode, resuming full processing")
+                        if hasattr(self.source, "cap") and self.source.cap is not None:
+                            try:
+                                for _ in range(2):
+                                    self.source.cap.grab()
+                            except Exception:
+                                pass
+                elif self.idle_timeout_sec > 0 and not self.is_idle:
+                    if (now_det - self._last_detection_time) >= self.idle_timeout_sec:
+                        self.is_idle = True
+                        logger.info(
+                            "No detections for %.1fs: entering idle mode (target: %.1f FPS)",
+                            self.idle_timeout_sec,
+                            self.idle_fps,
+                        )
 
                 # 2. Track & Count
                 events = self.counter.update(detections, timestamp=time.time())
