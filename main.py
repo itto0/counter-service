@@ -120,6 +120,7 @@ class CounterService:
         stream_uploader: Optional[Any] = None,
         idle_timeout_sec: float = 30.0,
         idle_fps: float = 1.0,
+        enable_immediate_sync: bool = True,
     ) -> None:
         self.line_id = line_id
         self.video_source_type = video_source_type.lower()
@@ -167,6 +168,8 @@ class CounterService:
 
         # Background sync worker control
         self._stop_event = threading.Event()
+        self._sync_trigger = threading.Event()
+        self.enable_immediate_sync = enable_immediate_sync
         self._sync_thread: Optional[threading.Thread] = None
 
         # Aggregation state tracking
@@ -265,6 +268,11 @@ class CounterService:
                 direction=self.line_direction,
             )
             self.counter = ChickenCounter(line_zone=line_zone, line_id=self.line_id)
+
+    def trigger_sync(self) -> None:
+        """Signal the background sync thread to wake and flush outbox immediately."""
+        if self.enable_immediate_sync and self.dispatcher is not None:
+            self._sync_trigger.set()
 
     def _sync_worker(self) -> None:
         """Background worker periodically pushing unsynced outbox batches to central API."""

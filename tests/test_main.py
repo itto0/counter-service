@@ -860,3 +860,48 @@ def test_counter_service_records_health_accuracy_pct_none_when_no_metrics(tmp_pa
     assert len(unsynced_health) == 1
     assert unsynced_health[0]["accuracy_pct"] is None
 
+
+def test_counter_service_immediate_sync_initialization_and_trigger(tmp_path):
+    """Verify CounterService initializes _sync_trigger and trigger_sync() functions correctly."""
+    db_file = str(tmp_path / "test_init_trigger.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_dispatcher = MagicMock()
+
+    # 1. Enabled by default
+    service = CounterService(
+        line_id="lineInitTest",
+        storage=storage,
+        dispatcher=mock_dispatcher,
+    )
+    assert service.enable_immediate_sync is True
+    assert hasattr(service, "_sync_trigger")
+    assert not service._sync_trigger.is_set()
+
+    # Calling trigger_sync sets the event
+    service.trigger_sync()
+    assert service._sync_trigger.is_set()
+    service._sync_trigger.clear()
+
+    # 2. Disabled explicitly
+    disabled_service = CounterService(
+        line_id="lineInitTest2",
+        storage=storage,
+        dispatcher=mock_dispatcher,
+        enable_immediate_sync=False,
+    )
+    assert disabled_service.enable_immediate_sync is False
+    disabled_service.trigger_sync()
+    assert not disabled_service._sync_trigger.is_set()
+
+    # 3. Enabled but no dispatcher (standalone mode)
+    no_dispatch_service = CounterService(
+        line_id="lineInitTest3",
+        storage=storage,
+        dispatcher=None,
+        enable_sync=False,
+        enable_immediate_sync=True,
+    )
+    no_dispatch_service.trigger_sync()
+    assert not no_dispatch_service._sync_trigger.is_set()
+
+
