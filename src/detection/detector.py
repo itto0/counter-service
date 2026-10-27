@@ -30,13 +30,27 @@ __all__ = [
 class Detection:
     """Bounding box detection with class information and anchor point."""
 
-    x1: float
-    y1: float
-    x2: float
-    y2: float
-    confidence: float
-    class_id: int
-    class_name: str
+    x1: float = 0.0
+    y1: float = 0.0
+    x2: float = 0.0
+    y2: float = 0.0
+    confidence: float = 0.0
+    class_id: int = 0
+    class_name: str = "chicken"
+    bbox: tuple[float, float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.bbox is not None:
+            object.__setattr__(self, "x1", float(self.bbox[0]))
+            object.__setattr__(self, "y1", float(self.bbox[1]))
+            object.__setattr__(self, "x2", float(self.bbox[2]))
+            object.__setattr__(self, "y2", float(self.bbox[3]))
+        else:
+            object.__setattr__(
+                self,
+                "bbox",
+                (float(self.x1), float(self.y1), float(self.x2), float(self.y2)),
+            )
 
     @property
     def anchor_bottom_center(self) -> tuple[float, float]:

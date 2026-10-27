@@ -2,6 +2,26 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
+
+try:
+    import numpy as np
+    import supervision as sv
+    try:
+        from trackers import ByteTrackTracker
+        HAS_BYTETRACK = True
+    except ImportError:
+        if hasattr(sv, "ByteTrack"):
+            ByteTrackTracker = sv.ByteTrack
+            HAS_BYTETRACK = True
+        else:
+            ByteTrackTracker = None
+            HAS_BYTETRACK = False
+except ImportError:
+    HAS_BYTETRACK = False
+    ByteTrackTracker = None
+    sv = None
+    np = None
 
 try:
     from src.detection.detector import Detection
@@ -15,6 +35,8 @@ except ImportError:
         from src.contracts import CountEventDTO
     except ImportError:
         from shared.contracts import CountEventDTO
+
+logger = logging.getLogger("counter.tracker")
 
 __all__ = ["TrackedObject", "VirtualLineZone", "ChickenCounter"]
 
@@ -102,15 +124,76 @@ class VirtualLineZone:
         return (-eps <= t <= 1.0 + eps) and (-eps <= u < 1.0)
 
 
+class _ByteTrackAdapter:
+    """Adapter for ByteTrackTracker (trackers) or ByteTrack (supervision)."""
+
+    def __init__(
+        self,
+        lost_track_buffer: int = 30,
+        frame_rate: float = 30.0,
+        track_activation_threshold: float = 0.4,
+        match_thresh: float = 0.7,
+        minimum_consecutive_frames: int = 1,
+    ) -> None:
+        self.minimum_consecutive_frames = minimum_consecutive_frames
+        effective_iou = min(match_thresh, 0.05) if match_thresh > 0.08 else match_thresh
+        try:
+            self._tracker = ByteTrackTracker(
+                lost_track_buffer=lost_track_buffer,
+                frame_rate=frame_rate,
+                track_activation_threshold=track_activation_threshold,
+                minimum_iou_threshold=effective_iou,
+                minimum_consecutive_frames=minimum_consecutive_frames,
+            )
+        except TypeError:
+            self._tracker = ByteTrackTracker(
+                lost_track_buffer=lost_track_buffer,
+                frame_rate=frame_rate,
+                track_activation_threshold=track_activation_threshold,
+                minimum_matching_threshold=match_thresh,
+                minimum_consecutive_frames=minimum_consecutive_frames,
+            )
+
+    def update(self, detections: sv.Detections, timestamp: float | None = None) -> sv.Detections:
+        if hasattr(self._tracker, "update"):
+            res = self._tracker.update(detections, timestamp=timestamp)
+        elif hasattr(self._tracker, "update_with_detections"):
+            res = self._tracker.update_with_detections(detections)
+        else:
+            res = self._tracker(detections)
+
+        # In trackers >= 2.6.0 with minimum_consecutive_frames == 1,
+        # newly spawned tracklets start with tracker_id == -1.
+        # Allocate tracker_ids immediately so initial frame anchor is captured.
+        if self.minimum_consecutive_frames == 1 and hasattr(self._tracker, "tracks"):
+            for track in self._tracker.tracks:
+                if getattr(track, "tracker_id", -1) == -1 and hasattr(self._tracker, "_allocate_tracker_id"):
+                    track.tracker_id = self._tracker._allocate_tracker_id()
+            if hasattr(res, "tracker_id") and res.tracker_id is not None and len(res.tracker_id) > 0:
+                tracker_ids = list(res.tracker_id)
+                for i in range(len(tracker_ids)):
+                    if tracker_ids[i] == -1 and i < len(detections):
+                        box = detections.xyxy[i]
+                        for track in self._tracker.tracks:
+                            if hasattr(track, "get_state_bbox") and np.allclose(track.get_state_bbox(), box, atol=1e-3):
+                                tracker_ids[i] = track.tracker_id
+                                break
+                res.tracker_id = np.array(tracker_ids, dtype=int)
+        return res
+
+
 class ChickenCounter:
     """Associates detections into tracks, detects line crossings, and emits count events."""
 
     def __init__(
         self,
         line_zone: VirtualLineZone,
-        line_id: str = "lineA",
+        line_id: str = "line-1",
         max_age: int = 30,
         max_distance: float = 60.0,
+        tracker_type: str = "centroid",
+        track_thresh: float = 0.4,
+        match_thresh: float = 0.7,
     ) -> None:
         """Initialize counter with a virtual line zone and tracking thresholds.
 
@@ -119,6 +202,9 @@ class ChickenCounter:
             line_id: Identifier of the monitored line.
             max_age: Maximum consecutive missed frames before track eviction.
             max_distance: Maximum Euclidean distance in pixels to match detection to track.
+            tracker_type: Tracking algorithm: "bytetrack" or "centroid".
+            track_thresh: Detection confidence threshold for track activation.
+            match_thresh: Matching threshold for track association.
         """
         self.line_zone = line_zone
         self.line_id = line_id
@@ -128,6 +214,19 @@ class ChickenCounter:
         self.tracks: dict[int, TrackedObject] = {}
         self.counted_track_ids: set[int] = set()
         self._next_track_id = 1
+
+        if tracker_type.lower() == "bytetrack" and HAS_BYTETRACK and ByteTrackTracker is not None:
+            self.tracker_type = "bytetrack"
+            self._bytetrack = _ByteTrackAdapter(
+                lost_track_buffer=max_age,
+                frame_rate=30.0,
+                track_activation_threshold=track_thresh,
+                match_thresh=match_thresh,
+                minimum_consecutive_frames=1,
+            )
+        else:
+            self.tracker_type = "centroid"
+            self._bytetrack = None
 
     def update(
         self,
@@ -151,6 +250,119 @@ class ChickenCounter:
         else:
             event_ts = datetime.now(timezone.utc)
 
+        if self.tracker_type == "bytetrack" and self._bytetrack is not None and sv is not None and np is not None:
+            return self._update_bytetrack(detections, timestamp=timestamp, event_ts=event_ts)
+        else:
+            return self._update_centroid(detections, event_ts=event_ts)
+
+    def _update_bytetrack(
+        self,
+        detections: list[Detection],
+        timestamp: float | None,
+        event_ts: datetime,
+    ) -> list[CountEventDTO]:
+        events: list[CountEventDTO] = []
+        if len(detections) == 0:
+            sv_dets = sv.Detections.empty()
+        else:
+            boxes = []
+            confidences = []
+            class_names = []
+            for d in detections:
+                if hasattr(d, "bbox") and d.bbox is not None:
+                    boxes.append(list(d.bbox))
+                else:
+                    boxes.append([float(d.x1), float(d.y1), float(d.x2), float(d.y2)])
+                confidences.append(float(d.confidence))
+                class_names.append(getattr(d, "class_name", "chicken"))
+            xyxy = np.array(boxes, dtype=np.float32)
+            conf = np.array(confidences, dtype=np.float32)
+            sv_dets = sv.Detections(
+                xyxy=xyxy,
+                confidence=conf,
+                data={"class_name": np.array(class_names)},
+            )
+
+        res = self._bytetrack.update(sv_dets, timestamp=timestamp)
+
+        active_track_ids: set[int] = set()
+        if hasattr(res, "tracker_id") and res.tracker_id is not None and len(res.tracker_id) > 0:
+            for i, tid in enumerate(res.tracker_id):
+                if tid is None or tid < 0:
+                    continue
+                # Use 1-based track_id (+1) for consistent positive IDs matching TrackedObject contracts
+                track_id = int(tid) + 1
+                active_track_ids.add(track_id)
+                x1, y1, x2, y2 = res.xyxy[i]
+                anchor = ((float(x1) + float(x2)) / 2.0, float(y2))
+                confidence = (
+                    float(res.confidence[i])
+                    if (res.confidence is not None and len(res.confidence) > i)
+                    else 1.0
+                )
+                class_name = "chicken"
+                if hasattr(res, "data") and "class_name" in res.data and len(res.data["class_name"]) > i:
+                    class_name = str(res.data["class_name"][i])
+                elif i < len(detections):
+                    class_name = getattr(detections[i], "class_name", "chicken")
+
+                if track_id in self.tracks:
+                    track = self.tracks[track_id]
+                    track.last_anchor = track.current_anchor
+                    track.current_anchor = anchor
+                    track.bbox = (float(x1), float(y1), float(x2), float(y2))
+                    track.confidence = confidence
+                    track.missed_frames = 0
+                    track.age += 1
+                else:
+                    track = TrackedObject(
+                        track_id=track_id,
+                        last_anchor=anchor,
+                        current_anchor=anchor,
+                        bbox=(float(x1), float(y1), float(x2), float(y2)),
+                        class_name=class_name,
+                        confidence=confidence,
+                        missed_frames=0,
+                        age=0,
+                        counted=False,
+                    )
+                    self.tracks[track_id] = track
+
+                if track_id not in self.counted_track_ids and not track.counted:
+                    if self.line_zone.crosses(track.last_anchor, track.current_anchor):
+                        track.counted = True
+                        self.counted_track_ids.add(track_id)
+                        self.total_count += 1
+                        events.append(
+                            CountEventDTO(
+                                track_id=track_id,
+                                ts_utc=event_ts,
+                                confidence=confidence,
+                                line_id=self.line_id,
+                                class_name=track.class_name,
+                            )
+                        )
+
+        # Increment missed frames for unmatched tracks and prune stale ones
+        stale_ids: list[int] = []
+        for track_id, track in self.tracks.items():
+            if track_id not in active_track_ids:
+                track.missed_frames += 1
+                track.age += 1
+                max_allowed_missed = min(self.max_age, 3) if track.counted else self.max_age
+                if track.missed_frames > max_allowed_missed:
+                    stale_ids.append(track_id)
+
+        for track_id in stale_ids:
+            del self.tracks[track_id]
+
+        return events
+
+    def _update_centroid(
+        self,
+        detections: list[Detection],
+        event_ts: datetime,
+    ) -> list[CountEventDTO]:
         events: list[CountEventDTO] = []
 
         # Find closest track-detection pairs within max_distance
@@ -202,6 +414,8 @@ class ChickenCounter:
                             track_id=track_id,
                             ts_utc=event_ts,
                             confidence=det.confidence,
+                            line_id=self.line_id,
+                            class_name=det.class_name,
                         )
                     )
 
