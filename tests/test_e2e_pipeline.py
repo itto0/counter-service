@@ -126,15 +126,23 @@ def test_create_source_modes():
     assert isinstance(file_threaded_unpaced, ThreadedVideoSource)
     assert file_threaded_unpaced.pace_fps == 0.0
 
+    # Live RTSP source must NEVER be throttled with playback pacing
+    rtsp_threaded = create_source(source_type="rtsp", video_path="rtsp://127.0.0.1:8554/live", capture_mode="threaded", pace_files=True)
+    assert isinstance(rtsp_threaded, ThreadedVideoSource)
+    assert rtsp_threaded.pace_fps == 0.0
+    assert rtsp_threaded.is_live is True
+
 
 def test_cli_flags_parsing(monkeypatch):
-    """Verify CLI parser handles --capture-mode, --pace-files, --tracker-type, --onnx-providers, and --duration."""
+    """Verify CLI parser handles capture mode, pacing, tracker thresholds, and env parsing."""
     from main import parse_args
 
     args_default = parse_args([])
     assert args_default.capture_mode == "threaded"
     assert args_default.pace_files is True
     assert args_default.tracker_type == "bytetrack"
+    assert args_default.track_thresh == 0.4
+    assert args_default.match_thresh == 0.7
     assert args_default.onnx_providers == "auto"
     assert args_default.duration is None
 
@@ -142,22 +150,61 @@ def test_cli_flags_parsing(monkeypatch):
         "--capture-mode", "direct",
         "--no-pace-files",
         "--tracker-type", "centroid",
+        "--track-thresh", "0.3",
+        "--match-thresh", "0.6",
         "--onnx-providers", "CUDAExecutionProvider,CPUExecutionProvider",
         "--duration", "5.5",
     ])
     assert args_explicit.capture_mode == "direct"
     assert args_explicit.pace_files is False
     assert args_explicit.tracker_type == "centroid"
+    assert args_explicit.track_thresh == 0.3
+    assert args_explicit.match_thresh == 0.6
     assert args_explicit.onnx_providers == "CUDAExecutionProvider,CPUExecutionProvider"
     assert args_explicit.duration == 5.5
 
     # Environment variable fallbacks
     monkeypatch.setenv("CAPTURE_MODE", "direct")
     monkeypatch.setenv("TRACKER_TYPE", "centroid")
+    monkeypatch.setenv("TRACKER_TRACK_THRESH", "0.35")
+    monkeypatch.setenv("TRACKER_MATCH_THRESH", "0.65")
     monkeypatch.setenv("ONNX_PROVIDERS", "OpenVINOExecutionProvider")
     monkeypatch.setenv("DURATION_SEC", "12.0")
     args_env = parse_args([])
     assert args_env.capture_mode == "direct"
     assert args_env.tracker_type == "centroid"
+    assert args_env.track_thresh == 0.35
+    assert args_env.match_thresh == 0.65
     assert args_env.onnx_providers == "OpenVINOExecutionProvider"
     assert args_env.duration == 12.0
+
+    # Empty string environment variables must not raise ValueError
+    monkeypatch.setenv("DURATION_SEC", "")
+    monkeypatch.setenv("TRACKER_TRACK_THRESH", "")
+    monkeypatch.setenv("TRACKER_MATCH_THRESH", "")
+    monkeypatch.setenv("CONF_THRESHOLD", "")
+    args_empty_env = parse_args([])
+    assert args_empty_env.duration is None
+    assert args_empty_env.track_thresh == 0.4
+    assert args_empty_env.match_thresh == 0.7
+
+
+def test_counter_service_tracker_thresholds_wiring():
+    """Verify CounterService wires tracker thresholds into ChickenCounter and PipelineConfig."""
+    from main import CounterService
+    from src.capture.source import SyntheticVideoSource
+
+    service = CounterService(
+        track_thresh=0.33,
+        match_thresh=0.66,
+        tracker_type="bytetrack",
+        source=SyntheticVideoSource(),
+        enable_sync=False,
+    )
+    assert service.track_thresh == pytest.approx(0.33)
+    assert service.match_thresh == pytest.approx(0.66)
+    assert service.counter.track_thresh == pytest.approx(0.33)
+    assert service.counter.match_thresh == pytest.approx(0.66)
+    assert service.pipeline_config is not None
+    assert service.pipeline_config.tracker_track_thresh == pytest.approx(0.33)
+    assert service.pipeline_config.tracker_match_thresh == pytest.approx(0.66)

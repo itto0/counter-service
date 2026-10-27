@@ -391,8 +391,9 @@ class ONNXDetector(Detector):
         "CPUExecutionProvider",
     )
 
-    @staticmethod
+    @classmethod
     def _resolve_providers(
+        cls,
         providers_config: str | Sequence[str] | None = None,
     ) -> list[str]:
         """Resolve ONNX execution providers with auto-negotiation and fallback.
@@ -456,15 +457,7 @@ class ONNXDetector(Detector):
                 except Exception:
                     available = []
 
-            preference_order = [
-                "CUDAExecutionProvider",
-                "TensorrtExecutionProvider",
-                "OpenVINOExecutionProvider",
-                "DirectMLExecutionProvider",
-                "CoreMLExecutionProvider",
-                "CPUExecutionProvider",
-            ]
-            providers = [p for p in preference_order if p in available]
+            providers = [p for p in cls.AUTO_PROVIDERS_PRIORITY if p in available]
             if "CPUExecutionProvider" not in providers:
                 providers.append("CPUExecutionProvider")
             return providers
@@ -609,16 +602,19 @@ class ONNXDetector(Detector):
                 providers=resolved_providers,
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to initialize ONNX session with providers %s: %s. Retrying with ['CPUExecutionProvider'].",
-                resolved_providers,
-                exc,
-            )
-            self._session = ort.InferenceSession(
-                self.model_path,
-                sess_options=session_options,
-                providers=["CPUExecutionProvider"],
-            )
+            if resolved_providers != ["CPUExecutionProvider"]:
+                logger.warning(
+                    "Failed to initialize ONNX session with providers %s: %s. Retrying with ['CPUExecutionProvider'].",
+                    resolved_providers,
+                    exc,
+                )
+                self._session = ort.InferenceSession(
+                    self.model_path,
+                    sess_options=session_options,
+                    providers=["CPUExecutionProvider"],
+                )
+            else:
+                raise
 
         if hasattr(self._session, "get_providers"):
             self.active_providers = self._session.get_providers()

@@ -2,30 +2,37 @@
 
 import sys
 import types
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import pytest
-
-if "onnxruntime" not in sys.modules:
-    _dummy_ort = types.ModuleType("onnxruntime")
-    _dummy_ort.get_available_providers = lambda: []
-    sys.modules["onnxruntime"] = _dummy_ort
 
 from src.detection.detector import ONNXDetector
 
 
-def test_resolve_providers_auto():
-    with patch("onnxruntime.get_available_providers", return_value=[
+@pytest.fixture(autouse=True)
+def isolate_onnxruntime(monkeypatch):
+    """Ensure onnxruntime in sys.modules is isolated and does not leak across test files."""
+    if "onnxruntime" not in sys.modules:
+        dummy_ort = types.ModuleType("onnxruntime")
+        dummy_ort.get_available_providers = lambda: []
+        monkeypatch.setitem(sys.modules, "onnxruntime", dummy_ort)
+
+
+def test_resolve_providers_auto(monkeypatch):
+    dummy_ort = types.ModuleType("onnxruntime")
+    dummy_ort.get_available_providers = lambda: [
         "CPUExecutionProvider",
         "OpenVINOExecutionProvider",
         "CUDAExecutionProvider",
-    ]):
-        providers = ONNXDetector._resolve_providers("auto")
-        # CUDA takes priority over OpenVINO, followed by CPU
-        assert providers == [
-            "CUDAExecutionProvider",
-            "OpenVINOExecutionProvider",
-            "CPUExecutionProvider",
-        ]
+    ]
+    monkeypatch.setitem(sys.modules, "onnxruntime", dummy_ort)
+    monkeypatch.setattr("src.detection.detector.ort", dummy_ort, raising=False)
+    providers = ONNXDetector._resolve_providers("auto")
+    # CUDA takes priority over OpenVINO, followed by CPU
+    assert providers == [
+        "CUDAExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "CPUExecutionProvider",
+    ]
 
 
 def test_resolve_providers_explicit():

@@ -57,6 +57,7 @@ class SyntheticVideoSource(VideoSource):
         self.fps = fps
         self.frame_idx = 0
         self.is_running = False
+        self.is_live = False
 
     def start(self) -> None:
         """Start generating synthetic video frames."""
@@ -93,12 +94,16 @@ class SyntheticVideoSource(VideoSource):
 class FileVideoSource(VideoSource):
     """OpenCV VideoCapture based wrapper for MP4/AVI replay with optional looping."""
 
-    def __init__(self, file_path: str, loop: bool = False) -> None:
+    def __init__(self, file_path: str, loop: bool = False, is_live: bool | None = None) -> None:
         self.file_path = str(file_path)
         self.loop = loop
         self.cap: cv2.VideoCapture | None = None
         self.is_running = False
         self.resolved_path = self._resolve_path(self.file_path)
+        if is_live is not None:
+            self.is_live = bool(is_live)
+        else:
+            self.is_live = str(file_path).lower().startswith(("rtsp://", "rtsps://", "http://", "https://"))
 
     @staticmethod
     def _resolve_path(raw_path: str) -> str:
@@ -188,11 +193,16 @@ class ThreadedVideoSource(VideoSource):
         maxsize: int = 1,
         pace_fps: float = 0.0,
         reconnect_timeout: float = 5.0,
+        is_live: bool | None = None,
     ) -> None:
         self.source = source
         self.maxsize = maxsize
         self.pace_fps = pace_fps
         self.reconnect_timeout = reconnect_timeout
+        if is_live is not None:
+            self.is_live = bool(is_live)
+        else:
+            self.is_live = bool(getattr(source, "is_live", False))
         self._frame_queue: queue.Queue[tuple[bool, np.ndarray | None]] = queue.Queue(maxsize=maxsize)
         self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
@@ -210,6 +220,51 @@ class ThreadedVideoSource(VideoSource):
         )
         self._worker_thread.start()
 
+    def _reconnect_live_source(self) -> bool:
+        """Attempt to reconnect a live video source with exponential backoff.
+
+        Returns True if reconnection succeeded and a frame was successfully queued,
+        False if reconnect_timeout was exceeded or _stop_event was set.
+        """
+        logger.warning(
+            "Live source read failed. Attempting reconnect (timeout=%.1fs)...",
+            self.reconnect_timeout,
+        )
+        stall_start = time.perf_counter()
+        backoff = 0.5
+
+        while not self._stop_event.is_set():
+            if (time.perf_counter() - stall_start) >= self.reconnect_timeout:
+                logger.error(
+                    "Live source reconnect timed out after %.2fs (limit=%.1fs)",
+                    time.perf_counter() - stall_start,
+                    self.reconnect_timeout,
+                )
+                return False
+
+            try:
+                self.source.stop()
+                self.source.start()
+                success, frame = self.source.read()
+                if success and frame is not None:
+                    logger.info("Live source successfully reconnected.")
+                    self._put_latest((True, frame))
+                    return True
+            except Exception as e:
+                logger.warning("Reconnect attempt failed: %s", e)
+
+            remaining = self.reconnect_timeout - (time.perf_counter() - stall_start)
+            if remaining <= 0:
+                return False
+
+            sleep_time = min(backoff, remaining)
+            if self._stop_event.wait(timeout=sleep_time):
+                return False
+
+            backoff = min(backoff * 2.0, 10.0)
+
+        return False
+
     def _reader_loop(self) -> None:
         last_frame_time = time.perf_counter()
         frame_interval = (1.0 / self.pace_fps) if self.pace_fps > 0 else 0.0
@@ -224,23 +279,27 @@ class ThreadedVideoSource(VideoSource):
 
             try:
                 success, frame = self.source.read()
-            except Exception:
-                logger.exception("Error reading from underlying video source")
-                if self._stop_event.is_set():
-                    break
-                self._put_latest((False, None))
-                time.sleep(0.01)
+            except Exception as e:
+                logger.warning("Error reading from underlying video source: %s", e)
+                success, frame = False, None
+
+            if success and frame is not None:
+                self._put_latest((True, frame))
                 continue
 
-            if not success or frame is None:
-                if self._stop_event.is_set():
-                    break
-                # Put EOF / failure and small backoff
-                self._put_latest((False, None))
-                time.sleep(0.01)
-                continue
+            # Read failed or EOF
+            if self._stop_event.is_set():
+                break
 
-            self._put_latest((True, frame))
+            if not self.is_live:
+                self._put_latest((False, None))
+                break
+
+            reconnected = self._reconnect_live_source()
+            if not reconnected:
+                if not self._stop_event.is_set():
+                    self._put_latest((False, None))
+                break
 
     def _put_latest(self, item: tuple[bool, np.ndarray | None]) -> None:
         while not self._stop_event.is_set():
@@ -253,14 +312,27 @@ class ThreadedVideoSource(VideoSource):
                 except queue.Empty:
                     pass
 
-    def read(self) -> tuple[bool, np.ndarray | None]:
-        """Read the latest available frame from the bounded queue."""
-        if self._worker_thread is None or (self._stop_event.is_set() and self._frame_queue.empty()):
-            return False, None
-        try:
-            return self._frame_queue.get(timeout=0.5)
-        except queue.Empty:
-            return False, None
+    def read(self, timeout: float = 0.5) -> tuple[bool, np.ndarray | None]:
+        """Read the latest available frame from the bounded queue.
+
+        Prevents premature EOF when transient queue timeouts occur while the
+        ingestion worker is still alive and running. Only returns (False, None)
+        when the worker signals stream termination / EOF or the source is stopped.
+        """
+        while not self._stop_event.is_set():
+            if self._worker_thread is None:
+                return False, None
+            try:
+                return self._frame_queue.get(timeout=timeout)
+            except queue.Empty:
+                if not self._worker_thread.is_alive():
+                    try:
+                        return self._frame_queue.get_nowait()
+                    except queue.Empty:
+                        return False, None
+                continue
+
+        return False, None
 
     def stop(self) -> None:
         """Stop ingestion thread and underlying source, and flush queue."""

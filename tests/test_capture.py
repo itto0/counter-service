@@ -1,6 +1,7 @@
 """Tests for VideoSource capture abstractions."""
 
 from pathlib import Path
+import threading
 import time
 import cv2
 import numpy as np
@@ -214,4 +215,109 @@ def test_threaded_video_source_pacing():
     elapsed = time.perf_counter() - start
     # 3 frames at 30 FPS should take at least ~0.05 seconds with pacing
     assert elapsed >= 0.04
+
+
+def test_threaded_video_source_queue_timeout_transient_delay():
+    """Verify read() does not produce premature EOF on transient queue timeout while worker is alive."""
+    class DelayedSource(VideoSource):
+        def __init__(self):
+            self.is_running = False
+
+        def start(self):
+            self.is_running = True
+
+        def read(self):
+            if not self.is_running:
+                return False, None
+            # Simulate a 120ms frame delay
+            time.sleep(0.12)
+            if not self.is_running:
+                return False, None
+            return True, np.zeros((10, 10, 3), dtype=np.uint8)
+
+        def stop(self):
+            self.is_running = False
+
+    delayed = DelayedSource()
+    threaded = ThreadedVideoSource(delayed, maxsize=1, pace_fps=0.0)
+    with threaded:
+        # Call read with a small timeout of 0.03s; worker is still alive and will produce frame at 0.12s
+        ret, frame = threaded.read(timeout=0.03)
+        assert ret is True
+        assert frame is not None
+        assert frame.shape == (10, 10, 3)
+
+
+def test_threaded_video_source_live_reconnect_success():
+    """Verify ThreadedVideoSource attempts reconnect with stop/start on live stream read failure."""
+    class FlakyLiveSource(VideoSource):
+        def __init__(self):
+            self.is_running = False
+            self.read_count = 0
+            self.stop_count = 0
+            self.start_count = 0
+            self.is_live = True
+            self.frame1_consumed = threading.Event()
+
+        def start(self):
+            self.is_running = True
+            self.start_count += 1
+
+        def read(self):
+            self.read_count += 1
+            if self.read_count == 1:
+                return True, np.full((10, 10, 3), 1, dtype=np.uint8)
+            elif self.read_count == 2:
+                # Wait until frame 1 is consumed by caller before simulating disconnect
+                self.frame1_consumed.wait(timeout=1.0)
+                return False, None
+            else:
+                # Reconnection successful
+                return True, np.full((10, 10, 3), 2, dtype=np.uint8)
+
+        def stop(self):
+            self.is_running = False
+            self.stop_count += 1
+
+    flaky = FlakyLiveSource()
+    source = ThreadedVideoSource(flaky, maxsize=1, is_live=True, reconnect_timeout=2.0)
+    with source:
+        ret1, frame1 = source.read()
+        assert ret1 is True
+        assert frame1 is not None
+        assert frame1[0, 0, 0] == 1
+        flaky.frame1_consumed.set()
+
+        # Second read triggers live reconnection
+        ret2, frame2 = source.read()
+        assert ret2 is True
+        assert frame2 is not None
+        assert frame2[0, 0, 0] == 2
+
+    assert flaky.stop_count >= 1
+    assert flaky.start_count >= 2
+
+
+def test_threaded_video_source_live_reconnect_timeout():
+    """Verify ThreadedVideoSource produces EOF when live reconnect exceeds reconnect_timeout."""
+    class DeadLiveSource(VideoSource):
+        def __init__(self):
+            self.is_running = False
+            self.is_live = True
+
+        def start(self):
+            self.is_running = True
+
+        def read(self):
+            return False, None
+
+        def stop(self):
+            self.is_running = False
+
+    dead = DeadLiveSource()
+    source = ThreadedVideoSource(dead, maxsize=1, is_live=True, reconnect_timeout=0.2)
+    with source:
+        ret, frame = source.read(timeout=0.05)
+        assert ret is False
+        assert frame is None
 

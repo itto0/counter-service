@@ -209,6 +209,8 @@ class ChickenCounter:
         self.line_id = line_id
         self.max_age = max_age
         self.max_distance = max_distance
+        self.track_thresh = float(track_thresh)
+        self.match_thresh = float(match_thresh)
         self.total_count = 0
         self.tracks: dict[int, TrackedObject] = {}
         self.counted_track_ids: set[int] = set()
@@ -307,7 +309,13 @@ class ChickenCounter:
                     else 1.0
                 )
                 class_name = "chicken"
-                if hasattr(res, "data") and "class_name" in res.data and len(res.data["class_name"]) > i:
+                if (
+                    hasattr(res, "data")
+                    and isinstance(res.data, dict)
+                    and "class_name" in res.data
+                    and res.data["class_name"] is not None
+                    and len(res.data["class_name"]) > i
+                ):
                     class_name = str(res.data["class_name"][i])
                 elif i < len(detections):
                     class_name = getattr(detections[i], "class_name", "chicken")

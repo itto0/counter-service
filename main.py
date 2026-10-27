@@ -73,12 +73,15 @@ except ImportError:
     from src.tracking.tracker import ChickenCounter, VirtualLineZone
 
 try:
-    from src.contracts import CountAggregateDTO, HealthSampleDTO
+    from src.contracts import CountAggregateDTO, HealthSampleDTO, PipelineConfig
 except ImportError:
     try:
-        from src.contracts import CountAggregateDTO, HealthSampleDTO
+        from src.contracts import CountAggregateDTO, HealthSampleDTO, PipelineConfig
     except ImportError:
-        from shared.contracts import CountAggregateDTO, HealthSampleDTO
+        try:
+            from shared.contracts import CountAggregateDTO, HealthSampleDTO, PipelineConfig
+        except ImportError:
+            PipelineConfig = None
 
 try:
     from src.sync.streamer import LiveStreamUploader
@@ -101,6 +104,8 @@ def create_source(
     raw_source: Optional[VideoSource] = None,
     mode: Optional[str] = None,
     fps: Optional[float] = None,
+    is_live: Optional[bool] = None,
+    reconnect_timeout: float = 5.0,
 ) -> VideoSource:
     """Create and configure a video source, optionally wrapped in ThreadedVideoSource.
 
@@ -114,6 +119,8 @@ def create_source(
         raw_source: Optional existing raw VideoSource to wrap.
         mode: Alias for capture_mode ('threaded' or 'direct').
         fps: Explicit FPS override for pacing calculation.
+        is_live: Whether the source represents a live stream.
+        reconnect_timeout: Stall duration before live reconnection gives up.
 
     Returns:
         Configured VideoSource instance.
@@ -121,10 +128,17 @@ def create_source(
     selected_mode = (mode or capture_mode or "threaded").lower()
     source_type_clean = (source_type or "synthetic").lower()
 
+    live_source_types = ("rtsp", "camera", "live", "webcam")
+    detected_live = (
+        source_type_clean in live_source_types
+        or str(video_path).lower().startswith(("rtsp://", "rtsps://", "http://", "https://"))
+    )
+    stream_is_live = is_live if is_live is not None else detected_live
+
     if raw_source is not None:
         source = raw_source
-    elif source_type_clean in ("file", "rtsp"):
-        source = FileVideoSource(file_path=video_path, loop=loop)
+    elif source_type_clean in ("file", "rtsp", "camera", "live", "webcam"):
+        source = FileVideoSource(file_path=video_path, loop=loop, is_live=stream_is_live)
     else:
         source = SyntheticVideoSource(width=640, height=480, fps=int(target_fps) if target_fps > 0 else 30)
 
@@ -132,16 +146,19 @@ def create_source(
         if isinstance(source, ThreadedVideoSource):
             return source
 
-        if fps is not None:
-            source_fps = float(fps)
-            pace_fps = source_fps if pace_files else 0.0
-        elif source_type_clean in ("file", "rtsp"):
-            source_fps = float(getattr(source, "fps", 30.0))
+        if source_type_clean == "file" and not stream_is_live:
+            source_fps = float(fps if fps is not None else getattr(source, "fps", 30.0))
             pace_fps = source_fps if pace_files else 0.0
         else:
             pace_fps = 0.0
 
-        return ThreadedVideoSource(source, maxsize=1, pace_fps=pace_fps)
+        return ThreadedVideoSource(
+            source,
+            maxsize=1,
+            pace_fps=pace_fps,
+            reconnect_timeout=reconnect_timeout,
+            is_live=stream_is_live,
+        )
 
     return source
 
@@ -183,6 +200,9 @@ class CounterService:
         tracker_type: str = "bytetrack",
         onnx_providers: str = "auto",
         duration_sec: Optional[float] = None,
+        pipeline_config: Optional[Any] = None,
+        track_thresh: float = 0.4,
+        match_thresh: float = 0.7,
     ) -> None:
         self.line_id = line_id
         self.video_source_type = video_source_type.lower()
@@ -210,10 +230,33 @@ class CounterService:
         self.idle_fps = idle_fps
         self.is_idle = False
         self._last_detection_time = time.perf_counter()
-        self.capture_mode = capture_mode
-        self.pace_files = pace_files
-        self.tracker_type = tracker_type
-        self.onnx_providers = onnx_providers
+
+        if pipeline_config is not None:
+            self.capture_mode = getattr(pipeline_config, "capture_mode", capture_mode)
+            self.pace_files = getattr(pipeline_config, "capture_pace_files", pace_files)
+            self.tracker_type = getattr(pipeline_config, "tracker_type", tracker_type)
+            self.onnx_providers = getattr(pipeline_config, "onnx_providers", onnx_providers)
+            self.track_thresh = float(getattr(pipeline_config, "tracker_track_thresh", track_thresh))
+            self.match_thresh = float(getattr(pipeline_config, "tracker_match_thresh", match_thresh))
+            self.pipeline_config = pipeline_config
+        else:
+            self.capture_mode = capture_mode
+            self.pace_files = pace_files
+            self.tracker_type = tracker_type
+            self.onnx_providers = onnx_providers
+            self.track_thresh = float(track_thresh)
+            self.match_thresh = float(match_thresh)
+            if PipelineConfig is not None:
+                self.pipeline_config = PipelineConfig(
+                    capture_mode=self.capture_mode,
+                    capture_pace_files=self.pace_files,
+                    tracker_type=self.tracker_type,
+                    onnx_providers=self.onnx_providers,
+                    tracker_track_thresh=self.track_thresh,
+                    tracker_match_thresh=self.match_thresh,
+                )
+            else:
+                self.pipeline_config = None
         self.duration_sec = duration_sec
 
         if self.stream_uploader is None and self.enable_stream_relay and LiveStreamUploader is not None:
@@ -343,6 +386,8 @@ class CounterService:
                 line_zone=line_zone,
                 line_id=self.line_id,
                 tracker_type=self.tracker_type,
+                track_thresh=self.track_thresh,
+                match_thresh=self.match_thresh,
             )
 
     def trigger_sync(self) -> None:
@@ -628,7 +673,8 @@ class CounterService:
                         self._health_frame_count = 0
                         self._health_latencies_ms = []
                         if (
-                            self.video_source_type in ("rtsp", "camera", "live", "webcam")
+                            not isinstance(self.source, ThreadedVideoSource)
+                            and self.video_source_type in ("rtsp", "camera", "live", "webcam")
                             and hasattr(self.source, "cap")
                             and self.source.cap is not None
                         ):
@@ -1118,6 +1164,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Tracking algorithm: 'bytetrack' (multi-object Kalman/IoU tracker) or 'centroid' (distance-based)",
     )
     parser.add_argument(
+        "--track-thresh",
+        type=float,
+        default=float(os.getenv("TRACKER_TRACK_THRESH") or "0.4"),
+        help="Detection confidence threshold for ByteTrack track activation (default: 0.4)",
+    )
+    parser.add_argument(
+        "--match-thresh",
+        type=float,
+        default=float(os.getenv("TRACKER_MATCH_THRESH") or "0.7"),
+        help="Matching threshold for ByteTrack association (default: 0.7)",
+    )
+    parser.add_argument(
         "--onnx-providers",
         default=os.getenv("ONNX_PROVIDERS", "auto"),
         help="Execution providers for ONNX Runtime (default: 'auto')",
@@ -1126,7 +1184,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--duration",
         "-d",
         type=float,
-        default=float(os.getenv("DURATION_SEC", "0.0")) or None,
+        default=float(os.getenv("DURATION_SEC") or "0.0") or None,
         help="Maximum duration in seconds to run before stopping (default: None)",
     )
     parser.add_argument(
@@ -1149,49 +1207,49 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--conf",
         type=float,
-        default=float(os.getenv("CONF_THRESHOLD", "0.7")),
+        default=float(os.getenv("CONF_THRESHOLD") or "0.7"),
         help="Detector confidence threshold (default: 0.7)",
     )
     parser.add_argument(
         "--nms-iou",
         type=float,
-        default=float(os.getenv("NMS_IOU_THRESHOLD", "0.45")),
+        default=float(os.getenv("NMS_IOU_THRESHOLD") or "0.45"),
         help="NMS IoU threshold for ONNX YOLO detector (default: 0.45)",
     )
     parser.add_argument(
         "--intensity",
         type=int,
-        default=int(os.getenv("INTENSITY_THRESHOLD", "150")),
+        default=int(os.getenv("INTENSITY_THRESHOLD") or "150"),
         help="Intensity threshold for MockDetector contour segmentation (default: 150)",
     )
     parser.add_argument(
         "--min-area",
         type=float,
-        default=float(os.getenv("MIN_AREA", "0.0")),
+        default=float(os.getenv("MIN_AREA") or "0.0"),
         help="Minimum contour area for MockDetector (default: 0.0)",
     )
     parser.add_argument(
         "--max-area",
         type=float,
-        default=float(os.getenv("MAX_AREA", "0.0")) or None,
+        default=float(os.getenv("MAX_AREA") or "0.0") or None,
         help="Maximum contour area for MockDetector (default: None)",
     )
     parser.add_argument(
         "--min-width",
         type=float,
-        default=float(os.getenv("MIN_WIDTH", "10.0")),
+        default=float(os.getenv("MIN_WIDTH") or "10.0"),
         help="Minimum bounding box width for MockDetector (default: 10.0)",
     )
     parser.add_argument(
         "--min-height",
         type=float,
-        default=float(os.getenv("MIN_HEIGHT", "10.0")),
+        default=float(os.getenv("MIN_HEIGHT") or "10.0"),
         help="Minimum bounding box height for MockDetector (default: 10.0)",
     )
     parser.add_argument(
         "--occupancy-threshold",
         type=float,
-        default=float(os.getenv("OCCUPANCY_THRESHOLD", "4.5")),
+        default=float(os.getenv("OCCUPANCY_THRESHOLD") or "4.5"),
         help="Carcass occupancy gradient threshold for ShackleDetector to reject empty shackles (default: 4.5)",
     )
     parser.add_argument(
@@ -1241,13 +1299,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-frames",
         type=int,
-        default=int(os.getenv("MAX_FRAMES", "0")) or None,
+        default=int(os.getenv("MAX_FRAMES") or "0") or None,
         help="Maximum frames to process before stopping",
     )
     parser.add_argument(
         "--target-fps",
         type=float,
-        default=float(os.getenv("TARGET_FPS", "0.0")),
+        default=float(os.getenv("TARGET_FPS") or "0.0"),
         help="Pace playback to target FPS (e.g. 30.0). 0.0 for unthrottled maximum speed.",
     )
     parser.add_argument(
@@ -1285,13 +1343,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stream-fps",
         type=float,
-        default=float(os.getenv("STREAM_FPS", "4.0")),
+        default=float(os.getenv("STREAM_FPS") or "4.0"),
         help="Target frame rate for live streaming relay (default: 4.0)",
     )
     parser.add_argument(
         "--sync-interval",
         type=float,
-        default=float(os.getenv("SYNC_INTERVAL_SEC", "5.0")),
+        default=float(os.getenv("SYNC_INTERVAL_SEC") or "5.0"),
         help="Seconds between background sync attempts",
     )
     parser.add_argument(
@@ -1310,13 +1368,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--aggregate-window",
         type=float,
-        default=float(os.getenv("AGGREGATE_WINDOW_SEC", "60.0")),
+        default=float(os.getenv("AGGREGATE_WINDOW_SEC") or "60.0"),
         help="Rolling aggregation window in seconds (default: 60.0)",
     )
     parser.add_argument(
         "--health-interval",
         type=float,
-        default=float(os.getenv("HEALTH_INTERVAL_SEC", "10.0")),
+        default=float(os.getenv("HEALTH_INTERVAL_SEC") or "10.0"),
         help="Health telemetry recording interval in seconds (default: 10.0)",
     )
 
@@ -1544,6 +1602,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         tracker_type=args.tracker_type,
         onnx_providers=args.onnx_providers,
         duration_sec=args.duration,
+        track_thresh=args.track_thresh,
+        match_thresh=args.match_thresh,
     )
 
     def handle_shutdown(signum: int, frame: object) -> None:
