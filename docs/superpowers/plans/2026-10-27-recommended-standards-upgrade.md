@@ -492,7 +492,7 @@ git commit -m "feat: implement dynamic ONNX execution provider negotiation and f
 - Consumes: `ThreadedVideoSource`, `ChickenCounter(tracker_type=...)`, `ONNXDetector(providers=...)`.
 - Produces: Updated `CounterService` CLI arguments `--capture-mode`, `--pace-files`, `--tracker-type`, `--onnx-providers`.
 
-- [ ] **Step 1: Write the failing end-to-end integration test**
+- [x] **Step 1: Write the failing end-to-end integration test**
 
 Create `tests/test_e2e_pipeline.py`:
 
@@ -550,12 +550,12 @@ def test_e2e_pipeline_with_threaded_capture_and_bytetrack():
         storage.close()
 ```
 
-- [ ] **Step 2: Run test to verify it passes with components from Tasks 2-4**
+- [x] **Step 2: Run test to verify it passes with components from Tasks 2-4**
 
 Run: `uv run pytest tests/test_e2e_pipeline.py`  
 Expected: PASS
 
-- [ ] **Step 3: Update `main.py` CLI parser and `CounterService`**
+- [x] **Step 3: Update `main.py` CLI parser and `CounterService`**
 
 In `main.py`:
 1. Add CLI flags to `build_cli_parser()`:
@@ -569,17 +569,17 @@ In `main.py`:
    Pass `tracker_type=args.tracker_type` to `ChickenCounter`.
    Pass `providers=args.onnx_providers` to `ONNXDetector`.
 
-- [ ] **Step 4: Verify `main.py --help` runs cleanly**
+- [x] **Step 4: Verify `main.py --help` runs cleanly**
 
 Run: `uv run python main.py --help`  
 Expected: Output showing `--capture-mode`, `--pace-files`, `--tracker-type`, `--onnx-providers`.
 
-- [ ] **Step 5: Run synthetic dry run via `main.py`**
+- [x] **Step 5: Run synthetic dry run via `main.py`**
 
 Run: `uv run python main.py --source synthetic --detector mock --tracker-type bytetrack --capture-mode threaded --duration 2`  
 Expected: Service starts, processes frames with ThreadedVideoSource + ByteTrack, and exits cleanly.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add main.py tests/test_e2e_pipeline.py
