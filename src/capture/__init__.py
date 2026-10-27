@@ -4,6 +4,7 @@ try:
     from .source import (
         FileVideoSource,
         SyntheticVideoSource,
+        ThreadedVideoSource,
         VideoSource,
     )
 except ImportError:
@@ -11,13 +12,15 @@ except ImportError:
         from src.capture.source import (
             FileVideoSource,
             SyntheticVideoSource,
+            ThreadedVideoSource,
             VideoSource,
         )
     except ImportError:
         from src.capture.source import (
             FileVideoSource,
             SyntheticVideoSource,
+            ThreadedVideoSource,
             VideoSource,
         )
 
-__all__ = ["VideoSource", "SyntheticVideoSource", "FileVideoSource"]
+__all__ = ["VideoSource", "SyntheticVideoSource", "FileVideoSource", "ThreadedVideoSource"]

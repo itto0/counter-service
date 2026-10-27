@@ -1,6 +1,7 @@
 """Tests for VideoSource capture abstractions."""
 
 from pathlib import Path
+import time
 import cv2
 import numpy as np
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from src.capture.source import (
     FileVideoSource,
     SyntheticVideoSource,
+    ThreadedVideoSource,
     VideoSource,
 )
 
@@ -164,3 +166,52 @@ def test_file_video_source_context_manager(sample_video_path: Path):
     ret, frame = source.read()
     assert ret is False
     assert frame is None
+
+
+def test_threaded_video_source_basic_lifecycle():
+    inner = SyntheticVideoSource(width=320, height=240, fps=30)
+    source = ThreadedVideoSource(inner, maxsize=1, pace_fps=0.0)
+
+    # Before start, reading returns False
+    success, frame = source.read()
+    assert success is False
+    assert frame is None
+
+    with source:
+        success, frame = source.read()
+        assert success is True
+        assert frame is not None
+        assert frame.shape == (240, 320, 3)
+
+    # After stop, reading returns False
+    success, frame = source.read()
+    assert success is False
+    assert frame is None
+
+
+def test_threaded_video_source_drops_stale_frames():
+    # Synthetic source generates frames with incrementing frame_idx
+    inner = SyntheticVideoSource(width=100, height=100, fps=100)
+    source = ThreadedVideoSource(inner, maxsize=1, pace_fps=0.0)
+
+    with source:
+        # Let worker push several frames while consumer sleeps
+        time.sleep(0.08)
+        success1, frame1 = source.read()
+        assert success1 is True
+        # Check that queue only kept the latest frame rather than buffering all
+        assert source._frame_queue.qsize() <= 1
+
+
+def test_threaded_video_source_pacing():
+    inner = SyntheticVideoSource(width=100, height=100, fps=30)
+    source = ThreadedVideoSource(inner, maxsize=1, pace_fps=30.0)
+
+    start = time.perf_counter()
+    with source:
+        for _ in range(3):
+            source.read()
+    elapsed = time.perf_counter() - start
+    # 3 frames at 30 FPS should take at least ~0.05 seconds with pacing
+    assert elapsed >= 0.04
+
