@@ -579,6 +579,9 @@ class CounterService:
                         self.line_id,
                     )
 
+                if events:
+                    self.trigger_sync()
+
                 # On-demand live video streaming relay
                 vis_frame = None
                 is_uploader_ready = (
@@ -911,6 +914,7 @@ class CounterService:
             logger.info("Cleaning up counter pipeline resources...")
         self.running = False
         self._stop_event.set()
+        self._sync_trigger.set()
 
         if self.stream_uploader is not None:
             try:

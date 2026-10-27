@@ -988,4 +988,82 @@ def test_sync_worker_suppresses_immediate_wake_during_backoff(tmp_path):
         worker_thread.join(timeout=1.0)
 
 
+def test_counter_pipeline_triggers_sync_on_count_events(tmp_path):
+    """Verify CounterService.run() calls trigger_sync() when counter produces count events."""
+    db_file = str(tmp_path / "test_pipeline_trigger.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.sync_once.return_value = 0
+    mock_dispatcher.backoff_sec = 1.0
+
+    service = CounterService(
+        line_id="lineTriggerPipe",
+        video_source_type="synthetic",
+        storage=storage,
+        dispatcher=mock_dispatcher,
+        enable_immediate_sync=True,
+    )
+
+    with patch.object(service, "trigger_sync", wraps=service.trigger_sync) as spy_trigger:
+        # Mock counter to emit an event on first update
+        from src.contracts import CountEventDTO
+        from datetime import datetime, timezone
+        mock_event = CountEventDTO(
+            track_id=1,
+            ts_utc=datetime.now(timezone.utc),
+            confidence=0.95,
+        )
+        with patch.object(service.counter, "update", return_value=[mock_event]):
+            service.run(max_frames=1)
+
+        assert spy_trigger.called, "Expected trigger_sync to be called when events occurred"
+
+
+def test_counter_service_stop_wakes_sync_thread_promptly(tmp_path):
+    """Verify CounterService.stop() signals _sync_trigger so worker exits immediately without waiting for sync_interval_sec."""
+    import time
+    db_file = str(tmp_path / "test_stop_prompt.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.sync_once.return_value = 0
+    mock_dispatcher.backoff_sec = 1.0
+
+    service = CounterService(
+        line_id="lineStopPrompt",
+        storage=storage,
+        dispatcher=mock_dispatcher,
+        sync_interval_sec=10.0,
+        enable_immediate_sync=True,
+    )
+
+    worker_thread = threading.Thread(target=service._sync_worker, daemon=True)
+    service._sync_thread = worker_thread
+    worker_thread.start()
+
+    time.sleep(0.05)
+    t0 = time.perf_counter()
+    service.stop()
+    worker_thread.join(timeout=1.0)
+    stop_duration = time.perf_counter() - t0
+
+    assert not worker_thread.is_alive()
+    assert stop_duration < 0.20, f"stop() took {stop_duration:.4f}s, expected <200ms"
+
+
+def test_counter_service_cleanup_sets_sync_trigger(tmp_path):
+    """Verify CounterService._cleanup() sets _sync_trigger so worker exits promptly on cleanup."""
+    db_file = str(tmp_path / "test_cleanup_prompt.db")
+    storage = LocalStorage(db_path=db_file)
+    service = CounterService(
+        line_id="lineCleanPrompt",
+        storage=storage,
+        enable_immediate_sync=True,
+    )
+    assert not service._sync_trigger.is_set()
+    service._cleanup()
+    assert service._sync_trigger.is_set()
+
+
+
+
 
