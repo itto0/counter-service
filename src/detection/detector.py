@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -14,6 +15,8 @@ try:
     import onnxruntime as ort
 except Exception:
     ort = None
+
+logger = logging.getLogger("counter.detector")
 
 __all__ = [
     "Detection",
@@ -371,6 +374,103 @@ def letterbox_image(
 class ONNXDetector(Detector):
     """ONNX Runtime detector supporting YOLO models with aspect-preserving letterboxing."""
 
+    AUTO_PROVIDERS_PRIORITY: Sequence[str] = (
+        "CUDAExecutionProvider",
+        "TensorrtExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "DirectMLExecutionProvider",
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider",
+    )
+
+    @staticmethod
+    def _resolve_providers(
+        providers_config: str | Sequence[str] | None = None,
+    ) -> list[str]:
+        """Resolve ONNX execution providers with auto-negotiation and fallback.
+
+        Args:
+            providers_config: Explicit provider list, comma-separated string,
+                'auto' for priority auto-detection, or None to read ONNX_PROVIDERS env.
+
+        Returns:
+            Ordered list of execution providers ending with 'CPUExecutionProvider'.
+        """
+        config: str | Sequence[str]
+        if providers_config is None:
+            config = os.getenv("ONNX_PROVIDERS", "auto")
+        else:
+            config = providers_config
+
+        if isinstance(config, str):
+            config_str = config.strip()
+            if config_str.lower() == "auto":
+                is_auto = True
+                explicit_items: list[str] = []
+            else:
+                is_auto = False
+                explicit_items = [p.strip() for p in config_str.split(",") if p.strip()]
+        elif isinstance(config, (list, tuple)):
+            items = [str(p).strip() for p in config if str(p).strip()]
+            if len(items) == 1 and items[0].lower() == "auto":
+                is_auto = True
+                explicit_items = []
+            else:
+                is_auto = False
+                explicit_items = items
+        else:
+            is_auto = False
+            explicit_items = []
+
+        if is_auto:
+            global ort
+            if "onnxruntime" in sys.modules:
+                ort = sys.modules["onnxruntime"]
+
+            if ort is None:
+                try:
+                    import onnxruntime as _ort
+
+                    ort = _ort
+                except Exception:
+                    ort = None
+
+            available: Any = []
+            if ort is not None and hasattr(ort, "get_available_providers"):
+                try:
+                    available = ort.get_available_providers()
+                except Exception:
+                    available = []
+
+            if not isinstance(available, (list, tuple, set)):
+                try:
+                    available = list(available)
+                except Exception:
+                    available = []
+
+            preference_order = [
+                "CUDAExecutionProvider",
+                "TensorrtExecutionProvider",
+                "OpenVINOExecutionProvider",
+                "DirectMLExecutionProvider",
+                "CoreMLExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+            providers = [p for p in preference_order if p in available]
+            if "CPUExecutionProvider" not in providers:
+                providers.append("CPUExecutionProvider")
+            return providers
+
+        # Explicit list: deduplicate preserving order, ensure CPUExecutionProvider at end
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for p in explicit_items:
+            if p not in seen and p != "CPUExecutionProvider":
+                seen.add(p)
+                deduped.append(p)
+        deduped.append("CPUExecutionProvider")
+        return deduped
+
     def __init__(
         self,
         model_path: str,
@@ -380,7 +480,7 @@ class ONNXDetector(Detector):
         nms_iou_threshold: float | None = None,
         classes: list[int] | None = None,
         class_names: Sequence[str] | dict[int, str] | None = None,
-        providers: list[str] | None = None,
+        providers: list[str] | Sequence[str] | str | None = None,
         input_width: int | None = None,
         input_height: int | None = None,
     ) -> None:
@@ -419,6 +519,7 @@ class ONNXDetector(Detector):
             self.class_names = {idx: name for idx, name in enumerate(class_names)}
 
         self.providers = providers
+        self.active_providers: list[str] = []
 
         self._session: Any = None
         self._input_name: str = ""
@@ -485,23 +586,7 @@ class ONNXDetector(Detector):
                     "Please install onnxruntime or onnxruntime-gpu to use ONNXDetector."
                 ) from exc
 
-        providers = self.providers
-        if providers is None:
-            available = (
-                ort.get_available_providers()
-                if hasattr(ort, "get_available_providers")
-                else []
-            )
-            preferred = [
-                "CUDAExecutionProvider",
-                "TensorrtExecutionProvider",
-                "CoreMLExecutionProvider",
-                "OpenVINOExecutionProvider",
-                "CPUExecutionProvider",
-            ]
-            providers = [p for p in preferred if p in available]
-            if not providers:
-                providers = ["CPUExecutionProvider"]
+        resolved_providers = self._resolve_providers(self.providers)
 
         session_options = ort.SessionOptions()
         session_options.intra_op_num_threads = max(1, os.cpu_count() or 1)
@@ -509,11 +594,29 @@ class ONNXDetector(Detector):
             ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         )
 
-        self._session = ort.InferenceSession(
-            self.model_path,
-            sess_options=session_options,
-            providers=providers,
-        )
+        try:
+            self._session = ort.InferenceSession(
+                self.model_path,
+                sess_options=session_options,
+                providers=resolved_providers,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize ONNX session with providers %s: %s. Retrying with ['CPUExecutionProvider'].",
+                resolved_providers,
+                exc,
+            )
+            self._session = ort.InferenceSession(
+                self.model_path,
+                sess_options=session_options,
+                providers=["CPUExecutionProvider"],
+            )
+
+        if hasattr(self._session, "get_providers"):
+            self.active_providers = self._session.get_providers()
+        else:
+            self.active_providers = ["CPUExecutionProvider"]
+
         inputs = self._session.get_inputs() if hasattr(self._session, "get_inputs") else []
         if inputs:
             self._input_name = inputs[0].name
