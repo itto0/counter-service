@@ -947,6 +947,7 @@ def test_sync_worker_wakes_immediately_on_trigger(tmp_path):
         assert wake_latency < 0.10, f"Wake latency {wake_latency:.4f}s exceeded 100ms threshold"
     finally:
         service.stop()
+        service._sync_trigger.set()
         worker_thread.join(timeout=1.0)
 
 
@@ -983,6 +984,7 @@ def test_sync_worker_suppresses_immediate_wake_during_backoff(tmp_path):
         assert mock_dispatcher.sync_once.call_count == initial_calls
     finally:
         service.stop()
+        service._sync_trigger.set()
         worker_thread.join(timeout=1.0)
 
 

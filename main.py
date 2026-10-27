@@ -280,13 +280,6 @@ class CounterService:
             return
         logger.info("Background sync worker started for line '%s'", self.line_id)
         while not self._stop_event.is_set():
-            # If backoff is active (> 1.0s), sleep for backoff duration and suppress immediate wakeups
-            backoff = getattr(self.dispatcher, "backoff_sec", 1.0)
-            if backoff > 1.0:
-                self._stop_event.wait(timeout=backoff)
-                if self._stop_event.is_set():
-                    break
-
             try:
                 synced = self.dispatcher.sync_once()
                 if synced > 0:
@@ -417,6 +410,7 @@ class CounterService:
         """Signal the pipeline loop and background sync worker to stop."""
         self.running = False
         self._stop_event.set()
+        self._sync_trigger.set()
         if self.stream_uploader is not None:
             try:
                 self.stream_uploader.stop()
@@ -436,6 +430,7 @@ class CounterService:
         """
         self.running = True
         self._stop_event.clear()
+        self._sync_trigger.clear()
         self.total_frames_processed = 0
         self._start_time_perf = time.perf_counter()
 
