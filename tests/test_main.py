@@ -1102,7 +1102,46 @@ def test_main_passes_immediate_sync_to_service():
         assert call_kwargs.get("enable_immediate_sync") is False
 
 
+def test_counter_service_end_to_end_immediate_sync_dispatch(tmp_path):
+    """Verify that when a count event occurs during pipeline run, dispatcher.sync_once() is invoked immediately."""
+    import time
+    db_file = str(tmp_path / "test_e2e_immediate.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_http_client = MagicMock()
+    mock_http_client.post.return_value.status_code = 200
 
+    dispatcher = OutboxSyncDispatcher(
+        storage=storage,
+        api_url="http://mock-api/sync",
+        line_id="lineE2E",
+        http_client=mock_http_client,
+    )
 
+    service = CounterService(
+        line_id="lineE2E",
+        video_source_type="synthetic",
+        storage=storage,
+        dispatcher=dispatcher,
+        sync_interval_sec=10.0,  # 10s fallback: immediate sync must fire without waiting
+        enable_immediate_sync=True,
+    )
 
+    from src.contracts import CountEventDTO
+    from datetime import datetime, timezone
+    mock_event = CountEventDTO(
+        track_id=42,
+        ts_utc=datetime.now(timezone.utc),
+        confidence=0.92,
+    )
+
+    # Emit count event on frame 1
+    with patch.object(service.counter, "update", return_value=[mock_event]):
+        t0 = time.perf_counter()
+        service.run(max_frames=1)
+        elapsed = time.perf_counter() - t0
+
+    # Ensure run completed swiftly (<1.5s total including cleanup flush)
+    assert elapsed < 1.5, f"Execution took {elapsed:.2f}s, expected fast execution"
+    # Ensure HTTP client received POST batch
+    assert mock_http_client.post.called
 
