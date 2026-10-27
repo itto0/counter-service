@@ -276,3 +276,22 @@ class ThreadedVideoSource(VideoSource):
             except queue.Empty:
                 break
 
+    @property
+    def is_running(self) -> bool:
+        """Return True if background ingestion thread is active."""
+        return (
+            self._worker_thread is not None
+            and self._worker_thread.is_alive()
+            and not self._stop_event.is_set()
+        )
+
+    @property
+    def cap(self) -> Any:
+        """Forward underlying OpenCV VideoCapture instance if available."""
+        return getattr(self.source, "cap", None)
+
+    @property
+    def fps(self) -> float:
+        """Forward underlying video source frame rate if available."""
+        return float(getattr(self.source, "fps", 30.0))
+

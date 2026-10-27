@@ -768,6 +768,7 @@ def test_detector_selection_onnx_instantiation():
             model_path="models/yolov8_chicken.onnx",
             conf_threshold=0.6,
             nms_iou_threshold=0.5,
+            providers="auto",
         )
         assert mock_service_cls.call_args.kwargs.get("detector") == mock_onnx.return_value
 

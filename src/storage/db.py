@@ -122,6 +122,16 @@ class LocalStorage:
             finally:
                 conn.close()
 
+    def insert_count_event(self, event: CountEventDTO, line_id: str | None = None) -> int:
+        """Insert a count event into outbox_events, initializing db if needed."""
+        self.init_db()
+        target_line = line_id or getattr(event, "line_id", None) or "line-1"
+        return self.insert_event(target_line, event)
+
+    def close(self) -> None:
+        """Close storage resources (no-op for connection-per-call SQLite)."""
+        pass
+
     def insert_aggregate(self, line_id: str, aggregate: CountAggregateDTO) -> int:
         """Insert a window aggregate into outbox_aggregates table."""
         with self._lock:

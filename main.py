@@ -41,6 +41,7 @@ try:
     from src.capture.source import (
         FileVideoSource,
         SyntheticVideoSource,
+        ThreadedVideoSource,
         VideoSource,
     )
     from src.detection.detector import (
@@ -57,6 +58,7 @@ except ImportError:
     from src.capture.source import (
         FileVideoSource,
         SyntheticVideoSource,
+        ThreadedVideoSource,
         VideoSource,
     )
     from src.detection.detector import (
@@ -87,6 +89,61 @@ except ImportError:
         LiveStreamUploader = None
 
 logger = logging.getLogger("counter.service")
+
+
+def create_source(
+    source_type: str = "synthetic",
+    video_path: str = "",
+    loop: bool = False,
+    capture_mode: str = "threaded",
+    pace_files: bool = True,
+    target_fps: float = 0.0,
+    raw_source: Optional[VideoSource] = None,
+    mode: Optional[str] = None,
+    fps: Optional[float] = None,
+) -> VideoSource:
+    """Create and configure a video source, optionally wrapped in ThreadedVideoSource.
+
+    Args:
+        source_type: Video source type ('synthetic', 'file', 'rtsp').
+        video_path: File path or stream URL.
+        loop: Whether to loop video file playback.
+        capture_mode: 'threaded' (wrap in ThreadedVideoSource) or 'direct'.
+        pace_files: Whether to pace file playback to source FPS when threaded.
+        target_fps: Target FPS override.
+        raw_source: Optional existing raw VideoSource to wrap.
+        mode: Alias for capture_mode ('threaded' or 'direct').
+        fps: Explicit FPS override for pacing calculation.
+
+    Returns:
+        Configured VideoSource instance.
+    """
+    selected_mode = (mode or capture_mode or "threaded").lower()
+    source_type_clean = (source_type or "synthetic").lower()
+
+    if raw_source is not None:
+        source = raw_source
+    elif source_type_clean in ("file", "rtsp"):
+        source = FileVideoSource(file_path=video_path, loop=loop)
+    else:
+        source = SyntheticVideoSource(width=640, height=480, fps=int(target_fps) if target_fps > 0 else 30)
+
+    if selected_mode == "threaded":
+        if isinstance(source, ThreadedVideoSource):
+            return source
+
+        if fps is not None:
+            source_fps = float(fps)
+            pace_fps = source_fps if pace_files else 0.0
+        elif source_type_clean in ("file", "rtsp"):
+            source_fps = float(getattr(source, "fps", 30.0))
+            pace_fps = source_fps if pace_files else 0.0
+        else:
+            pace_fps = 0.0
+
+        return ThreadedVideoSource(source, maxsize=1, pace_fps=pace_fps)
+
+    return source
 
 
 class CounterService:
@@ -121,6 +178,11 @@ class CounterService:
         idle_timeout_sec: float = 30.0,
         idle_fps: float = 1.0,
         enable_immediate_sync: bool = True,
+        capture_mode: str = "threaded",
+        pace_files: bool = True,
+        tracker_type: str = "bytetrack",
+        onnx_providers: str = "auto",
+        duration_sec: Optional[float] = None,
     ) -> None:
         self.line_id = line_id
         self.video_source_type = video_source_type.lower()
@@ -148,6 +210,11 @@ class CounterService:
         self.idle_fps = idle_fps
         self.is_idle = False
         self._last_detection_time = time.perf_counter()
+        self.capture_mode = capture_mode
+        self.pace_files = pace_files
+        self.tracker_type = tracker_type
+        self.onnx_providers = onnx_providers
+        self.duration_sec = duration_sec
 
         if self.stream_uploader is None and self.enable_stream_relay and LiveStreamUploader is not None:
             if self.api_sync_url and "/api/v1" in self.api_sync_url:
@@ -204,10 +271,15 @@ class CounterService:
         # Video source
         if source is not None:
             self.source = source
-        elif self.video_source_type in ("file", "rtsp"):
-            self.source = FileVideoSource(file_path=self.video_path, loop=self.loop)
         else:
-            self.source = SyntheticVideoSource(width=640, height=480, fps=30)
+            self.source = create_source(
+                source_type=self.video_source_type,
+                video_path=self.video_path,
+                loop=self.loop,
+                capture_mode=self.capture_mode,
+                pace_files=self.pace_files,
+                target_fps=self.target_fps,
+            )
 
         # Detector
         self.detector = detector or MockDetector(min_confidence=0.8)
@@ -267,7 +339,11 @@ class CounterService:
                 end=end_pt,
                 direction=self.line_direction,
             )
-            self.counter = ChickenCounter(line_zone=line_zone, line_id=self.line_id)
+            self.counter = ChickenCounter(
+                line_zone=line_zone,
+                line_id=self.line_id,
+                tracker_type=self.tracker_type,
+            )
 
     def trigger_sync(self) -> None:
         """Signal the background sync thread to wake and flush outbox immediately."""
@@ -417,17 +493,25 @@ class CounterService:
             except Exception as e:
                 logger.warning("Error stopping stream uploader: %s", e)
 
-    def run(self, max_frames: Optional[int] = None) -> int:
+    def run(
+        self,
+        max_frames: Optional[int] = None,
+        max_duration_sec: Optional[float] = None,
+    ) -> int:
         """Run the counting pipeline loop: Capture -> Detect -> Track/Count -> LocalStorage.
 
         Syncing is handled decoupled in a background thread to prevent frame dropping.
 
         Args:
             max_frames: Optional limit on frames to process (useful for tests/benchmarks).
+            max_duration_sec: Optional maximum elapsed runtime in seconds.
 
         Returns:
             Total chickens counted during this run.
         """
+        if max_duration_sec is None:
+            max_duration_sec = self.duration_sec
+
         self.running = True
         self._stop_event.clear()
         self._sync_trigger.clear()
@@ -493,6 +577,15 @@ class CounterService:
                 if max_frames is not None and self.total_frames_processed >= max_frames:
                     if self.cli_display:
                         print(f"\nReached max frames limit ({max_frames}).")
+                    break
+
+                if (
+                    max_duration_sec is not None
+                    and (time.perf_counter() - (self._start_time_perf or time.perf_counter()))
+                    >= max_duration_sec
+                ):
+                    if self.cli_display:
+                        print(f"\nReached max duration limit ({max_duration_sec:.1f}s).")
                     break
 
                 frame_start = time.perf_counter()
@@ -862,7 +955,9 @@ class CounterService:
         print("=" * 74)
         print(f"  Line ID:         {self.line_id}")
         print(f"  Video Source:    {source_desc}")
+        print(f"  Capture Mode:    {self.capture_mode}")
         print(f"  Detector:        {det_name}")
+        print(f"  Tracker:         {self.tracker_type}")
         print(f"  Virtual Line:    ({start_pt[0]:.1f}, {start_pt[1]:.1f}) -> ({end_pt[0]:.1f}, {end_pt[1]:.1f}) [{direction}]")
         print(f"  API Sync:        {sync_desc}")
         print(f"  Stream Relay:    {stream_desc}")
@@ -972,7 +1067,7 @@ class CounterService:
             )
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> argparse.ArgumentParser:
     """Build command line argument parser for edge counter service."""
     parser = argparse.ArgumentParser(
         description="Edge Poultry Counter Service - Process real video and count chickens in CLI"
@@ -987,6 +1082,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--source",
         default=None,
         help="Video source type: 'synthetic', 'file', or 'rtsp' (default: synthetic)",
+    )
+    parser.add_argument(
+        "--capture-mode",
+        default=os.getenv("CAPTURE_MODE", "threaded"),
+        choices=["threaded", "direct"],
+        help="Video capture ingestion mode: 'threaded' (background thread with bounded queue) or 'direct' (blocking)",
+    )
+    pace_default = os.getenv("PACE_FILES", "1").lower() not in ("0", "false", "no")
+    if hasattr(argparse, "BooleanOptionalAction"):
+        parser.add_argument(
+            "--pace-files",
+            action=argparse.BooleanOptionalAction,
+            default=pace_default,
+            help="Pace file video playback to native FPS to simulate real-time ingestion (default: True)",
+        )
+    else:
+        parser.add_argument(
+            "--pace-files",
+            dest="pace_files",
+            action="store_true",
+            default=pace_default,
+            help="Pace file video playback to native FPS (default: True)",
+        )
+        parser.add_argument(
+            "--no-pace-files",
+            dest="pace_files",
+            action="store_false",
+            help="Do not pace file video playback; process as fast as possible",
+        )
+    parser.add_argument(
+        "--tracker-type",
+        default=os.getenv("TRACKER_TYPE", "bytetrack"),
+        choices=["bytetrack", "centroid"],
+        help="Tracking algorithm: 'bytetrack' (multi-object Kalman/IoU tracker) or 'centroid' (distance-based)",
+    )
+    parser.add_argument(
+        "--onnx-providers",
+        default=os.getenv("ONNX_PROVIDERS", "auto"),
+        help="Execution providers for ONNX Runtime (default: 'auto')",
+    )
+    parser.add_argument(
+        "--duration",
+        "-d",
+        type=float,
+        default=float(os.getenv("DURATION_SEC", "0.0")) or None,
+        help="Maximum duration in seconds to run before stopping (default: None)",
     )
     parser.add_argument(
         "--line-id",
@@ -1189,9 +1330,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+build_arg_parser = build_cli_parser
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse command line arguments with environment variable fallbacks."""
-    parser = build_arg_parser()
+    parser = build_cli_parser()
     if argv is None:
         # If running inside pytest or non-cli environment without explicit argv, don't parse sys.argv
         if any("pytest" in str(arg) for arg in sys.argv):
@@ -1342,8 +1486,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 model_path=args.model,
                 conf_threshold=args.conf,
                 nms_iou_threshold=args.nms_iou,
+                providers=args.onnx_providers,
             )
-            logger.info("Initialized ONNXDetector with model: %s", args.model)
+            logger.info("Initialized ONNXDetector with model: %s (providers=%s)", args.model, args.onnx_providers)
         except Exception as e:
             logger.warning("Failed to load ONNX model '%s': %s. Falling back to ShackleDetector / MockDetector.", args.model, e)
             if args.video and ("rekaman" in args.video.lower() or args.direction in ("right", "left")):
@@ -1394,6 +1539,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         show_window=args.show_window,
         enable_stream_relay=args.enable_stream_relay,
         stream_fps=args.stream_fps,
+        capture_mode=args.capture_mode,
+        pace_files=args.pace_files,
+        tracker_type=args.tracker_type,
+        onnx_providers=args.onnx_providers,
+        duration_sec=args.duration,
     )
 
     def handle_shutdown(signum: int, frame: object) -> None:
@@ -1406,7 +1556,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     except (ValueError, AttributeError):
         pass
 
-    service.run(max_frames=args.max_frames)
+    service.run(max_frames=args.max_frames, max_duration_sec=args.duration)
 
 
 if __name__ == "__main__":

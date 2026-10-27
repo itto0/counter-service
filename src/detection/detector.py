@@ -86,6 +86,10 @@ class Detector(ABC):
         """
         pass
 
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        """Alias for predict."""
+        return self.predict(frame)
+
 
 class MockDetector(Detector):
     """Threshold-based procedural detector for testing without deep learning models."""
@@ -103,6 +107,7 @@ class MockDetector(Detector):
         apply_blur: bool = False,
         morph_open: bool = False,
         roi: tuple[int, int, int, int] | None = None,
+        detections: list[Detection] | None = None,
     ) -> None:
         self.min_confidence = min_confidence
         self.min_width = min_width
@@ -115,9 +120,12 @@ class MockDetector(Detector):
         self.apply_blur = apply_blur
         self.morph_open = morph_open
         self.roi = roi
+        self.detections = detections
 
     def predict(self, frame: np.ndarray) -> list[Detection]:
         """Detect bright contour regions above the intensity threshold."""
+        if self.detections is not None:
+            return list(self.detections)
         detections: list[Detection] = []
         if frame is None or frame.size == 0:
             return detections
