@@ -275,11 +275,18 @@ class CounterService:
             self._sync_trigger.set()
 
     def _sync_worker(self) -> None:
-        """Background worker periodically pushing unsynced outbox batches to central API."""
+        """Background worker periodically or immediately pushing unsynced outbox batches to central API."""
         if self.dispatcher is None:
             return
         logger.info("Background sync worker started for line '%s'", self.line_id)
         while not self._stop_event.is_set():
+            # If backoff is active (> 1.0s), sleep for backoff duration and suppress immediate wakeups
+            backoff = getattr(self.dispatcher, "backoff_sec", 1.0)
+            if backoff > 1.0:
+                self._stop_event.wait(timeout=backoff)
+                if self._stop_event.is_set():
+                    break
+
             try:
                 synced = self.dispatcher.sync_once()
                 if synced > 0:
@@ -287,13 +294,16 @@ class CounterService:
             except Exception as e:
                 logger.warning("Error in background sync worker: %s", e)
 
-            # Determine sleep duration based on backoff or configured interval
-            sleep_time = self.sync_interval_sec
+            # Check backoff after sync attempt
             backoff = getattr(self.dispatcher, "backoff_sec", 1.0)
             if backoff > 1.0:
-                sleep_time = max(sleep_time, backoff)
-
-            self._stop_event.wait(timeout=sleep_time)
+                self._stop_event.wait(timeout=backoff)
+            elif self.enable_immediate_sync:
+                # Wait for immediate trigger, periodic fallback timeout, or stop signal
+                self._sync_trigger.wait(timeout=self.sync_interval_sec)
+                self._sync_trigger.clear()
+            else:
+                self._stop_event.wait(timeout=self.sync_interval_sec)
 
         logger.info("Background sync worker stopped for line '%s'", self.line_id)
 

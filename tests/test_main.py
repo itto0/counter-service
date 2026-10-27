@@ -1,5 +1,6 @@
 """Tests for edge counter service production entrypoint and runner."""
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from main import CounterService, main
@@ -903,5 +904,86 @@ def test_counter_service_immediate_sync_initialization_and_trigger(tmp_path):
     )
     no_dispatch_service.trigger_sync()
     assert not no_dispatch_service._sync_trigger.is_set()
+
+
+def test_sync_worker_wakes_immediately_on_trigger(tmp_path):
+    """Verify _sync_worker wakes immediately (<100ms) on _sync_trigger.set() without waiting for sync_interval_sec."""
+    import time
+    db_file = str(tmp_path / "test_immediate_wake.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.sync_once.return_value = 0
+    mock_dispatcher.backoff_sec = 1.0
+
+    service = CounterService(
+        line_id="lineWakeTest",
+        storage=storage,
+        dispatcher=mock_dispatcher,
+        sync_interval_sec=10.0,  # Long 10-second polling interval
+        enable_immediate_sync=True,
+    )
+
+    # Start sync thread directly
+    worker_thread = threading.Thread(target=service._sync_worker, daemon=True)
+    worker_thread.start()
+
+    try:
+        # Give worker a moment to start and enter wait state
+        time.sleep(0.05)
+        initial_calls = mock_dispatcher.sync_once.call_count
+
+        t0 = time.perf_counter()
+        # Trigger immediate sync
+        service.trigger_sync()
+
+        # Wait until dispatcher.sync_once is called again
+        deadline = time.perf_counter() + 0.5
+        while mock_dispatcher.sync_once.call_count == initial_calls and time.perf_counter() < deadline:
+            time.sleep(0.005)
+
+        wake_latency = time.perf_counter() - t0
+        assert mock_dispatcher.sync_once.call_count > initial_calls
+        # Must wake in well under 100ms (far less than the 10.0s interval)
+        assert wake_latency < 0.10, f"Wake latency {wake_latency:.4f}s exceeded 100ms threshold"
+    finally:
+        service.stop()
+        worker_thread.join(timeout=1.0)
+
+
+def test_sync_worker_suppresses_immediate_wake_during_backoff(tmp_path):
+    """Verify _sync_worker honors backoff_sec and does not wake immediately when backoff > 1.0."""
+    import time
+    db_file = str(tmp_path / "test_backoff_suppress.db")
+    storage = LocalStorage(db_path=db_file)
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.sync_once.return_value = 0
+    # Simulate active backoff (e.g. 5.0 seconds due to network error)
+    mock_dispatcher.backoff_sec = 5.0
+
+    service = CounterService(
+        line_id="lineBackoffTest",
+        storage=storage,
+        dispatcher=mock_dispatcher,
+        sync_interval_sec=5.0,
+        enable_immediate_sync=True,
+    )
+
+    worker_thread = threading.Thread(target=service._sync_worker, daemon=True)
+    worker_thread.start()
+
+    try:
+        time.sleep(0.05)
+        initial_calls = mock_dispatcher.sync_once.call_count
+
+        # Trigger sync while backoff is active
+        service.trigger_sync()
+
+        # Sleep 150ms: worker should NOT wake immediately because backoff is active
+        time.sleep(0.15)
+        assert mock_dispatcher.sync_once.call_count == initial_calls
+    finally:
+        service.stop()
+        worker_thread.join(timeout=1.0)
+
 
 
