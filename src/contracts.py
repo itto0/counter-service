@@ -39,11 +39,23 @@ class SyncBatchPayload(BaseModel):
     health: HealthSampleDTO | None = None
 
 
+class PipelineConfig(BaseModel):
+    """Runtime configuration for capture, tracking, and inference."""
+
+    capture_mode: str = Field(default="threaded", description="threaded or direct")
+    capture_pace_files: bool = Field(default=True, description="Pace video file reads to native FPS")
+    tracker_type: str = Field(default="bytetrack", description="bytetrack or centroid")
+    onnx_providers: str = Field(default="auto", description="auto or comma-separated list of providers")
+    tracker_track_thresh: float = Field(default=0.4, description="High-confidence detection threshold for tracker")
+    tracker_match_thresh: float = Field(default=0.7, description="IoU matching threshold for tracker")
+
+
 __all__ = [
     "CountEventDTO",
     "CountAggregateDTO",
     "HealthSampleDTO",
     "SyncBatchPayload",
+    "PipelineConfig",
 ]
 
 # Ensure unified module identity across standalone and monorepo import paths
