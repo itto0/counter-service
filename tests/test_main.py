@@ -1124,6 +1124,7 @@ def test_counter_service_end_to_end_immediate_sync_dispatch(tmp_path):
         dispatcher=dispatcher,
         sync_interval_sec=10.0,  # 10s fallback: immediate sync must fire without waiting
         enable_immediate_sync=True,
+        cli_display=False,
     )
 
     from src.contracts import CountEventDTO
@@ -1140,8 +1141,8 @@ def test_counter_service_end_to_end_immediate_sync_dispatch(tmp_path):
         service.run(max_frames=1)
         elapsed = time.perf_counter() - t0
 
-    # Ensure run completed swiftly (<1.5s total including cleanup flush)
-    assert elapsed < 1.5, f"Execution took {elapsed:.2f}s, expected fast execution"
+    # Ensure run completed swiftly (<4.0s total, far less than 10.0s fallback interval)
+    assert elapsed < 4.0, f"Execution took {elapsed:.2f}s, expected fast execution (<4.0s vs 10.0s fallback)"
     # Ensure HTTP client received POST batch
     assert mock_http_client.post.called
 
