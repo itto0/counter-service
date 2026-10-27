@@ -136,13 +136,12 @@ class _ByteTrackAdapter:
         minimum_consecutive_frames: int = 1,
     ) -> None:
         self.minimum_consecutive_frames = minimum_consecutive_frames
-        effective_iou = min(match_thresh, 0.05) if match_thresh > 0.08 else match_thresh
         try:
             self._tracker = ByteTrackTracker(
                 lost_track_buffer=lost_track_buffer,
                 frame_rate=frame_rate,
                 track_activation_threshold=track_activation_threshold,
-                minimum_iou_threshold=effective_iou,
+                minimum_iou_threshold=match_thresh,
                 minimum_consecutive_frames=minimum_consecutive_frames,
             )
         except TypeError:
@@ -215,15 +214,22 @@ class ChickenCounter:
         self.counted_track_ids: set[int] = set()
         self._next_track_id = 1
 
-        if tracker_type.lower() == "bytetrack" and HAS_BYTETRACK and ByteTrackTracker is not None:
-            self.tracker_type = "bytetrack"
-            self._bytetrack = _ByteTrackAdapter(
-                lost_track_buffer=max_age,
-                frame_rate=30.0,
-                track_activation_threshold=track_thresh,
-                match_thresh=match_thresh,
-                minimum_consecutive_frames=1,
-            )
+        if tracker_type.lower() == "bytetrack":
+            if HAS_BYTETRACK and ByteTrackTracker is not None:
+                self.tracker_type = "bytetrack"
+                self._bytetrack = _ByteTrackAdapter(
+                    lost_track_buffer=max_age,
+                    frame_rate=30.0,
+                    track_activation_threshold=track_thresh,
+                    match_thresh=match_thresh,
+                    minimum_consecutive_frames=1,
+                )
+            else:
+                logger.warning(
+                    "ByteTrack requested but dependencies unavailable; falling back to centroid tracking."
+                )
+                self.tracker_type = "centroid"
+                self._bytetrack = None
         else:
             self.tracker_type = "centroid"
             self._bytetrack = None
