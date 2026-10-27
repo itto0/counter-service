@@ -9,6 +9,9 @@ A standalone, lightweight edge computer vision service designed for industrial p
 - **Decoupled Architecture**: Fully self-contained service that can be built and deployed without the monorepo root or central API code.
 - **Offline-First Store & Forward**: Uses a local SQLite database (`counter_outbox.db`) to queue count aggregates and health telemetry. If network connectivity drops, edge processing continues uninterrupted and backlogs flush automatically upon reconnection.
 - **Zero Inbound Attack Surface**: Operates purely as an outbound HTTP client — exposes no listening network ports, making it secure for deployment in factory OT networks.
+- **Zero-Drift Threaded Capture**: Decoupled ingestion via `ThreadedVideoSource` using a drop-on-full size-1 frame queue to eliminate RTSP buffer accumulation and latency drift.
+- **ByteTrack Multi-Object Tracking**: Industrial-grade tracking using Kalman filter motion prediction and two-stage IoU association, with seamless automatic fallback to `CentroidTracker`.
+- **Hardware Acceleration Auto-Negotiation**: Automatic execution provider discovery and priority cascade (`CUDA` -> `TensorRT` -> `OpenVINO` -> `DirectML` -> `CoreML` -> `CPU`) for ONNX Runtime YOLO models with resilient CPU fallback.
 - **Flexible Detection Engines**:
   - `auto`: Automatic detector selection.
   - `shackle`: Industrial poultry conveyor detector with carcass occupancy gradient analysis to reject empty shackles.
@@ -30,9 +33,9 @@ counter-service/
 ├── main.py                # Service entry point and CLI runner
 ├── benchmark.py           # Performance and latency benchmark suite
 ├── src/
-│   ├── capture/           # Video capture (synthetic, file, RTSP)
-│   ├── detection/         # Shackle, ONNX, and mock detectors
-│   ├── tracking/          # Centroid tracker & virtual line zone
+│   ├── capture/           # Video capture (synthetic, file, RTSP, ThreadedVideoSource)
+│   ├── detection/         # Shackle, ONNX, and mock detectors with hardware cascade
+│   ├── tracking/          # ByteTrack & centroid trackers, virtual line crossing zone
 │   ├── storage/           # Local SQLite outbox database manager
 │   ├── sync/              # Background HTTP batch dispatcher
 │   ├── contracts.py       # Data transfer schemas (Pydantic models)
@@ -62,6 +65,11 @@ numpy>=1.24.0
 pydantic>=2.5.0
 httpx>=0.27.0
 python-dotenv>=1.0.0
+onnxruntime>=1.18.0
+supervision>=0.20.0
+trackers>=2.6.0
+scipy>=1.11.0
+av>=12.0.0
 ```
 
 > **Note on Visual Preview Window (`--show-window`)**:
@@ -70,6 +78,98 @@ python-dotenv>=1.0.0
 > pip install opencv-python
 > ```
 
+---
+
+## Video Ingestion & Latency Management (ThreadedVideoSource)
+
+Industrial edge deployments processing live RTSP camera feeds face a fundamental latency challenge: standard OpenCV `cv2.VideoCapture` sequentially blocks on frame retrieval and buffers packets internally. If downstream YOLO inference, tracking, or network I/O takes even 40–80 ms per frame, the ingest queue falls behind real-time. Over minutes or hours, the processed frames become seconds or minutes behind real-time—accumulating severe latency drift.
+
+`ThreadedVideoSource` decouples capture ingestion from downstream inference:
+- **Dedicated Background Ingestion**: A daemon worker thread continuously pulls frames from the camera or video source at full speed.
+- **Drop-on-Full Size-1 Queue**: Received frames are placed into a bounded `queue.Queue(maxsize=1)`. When a new frame arrives and the queue already contains an unprocessed frame (because inference is busy), the stale frame is dropped instantly via `get_nowait()`, and the latest frame is inserted (`_put_latest`).
+- **Zero RTSP Latency Accumulation**: Guarantees that the counter pipeline always processes the freshest frame, maintaining sub-second latency from optical conveyor passage to outbox event generation.
+- **Configurable Modes**:
+  - `threaded` (default): Uses the background thread and drop-on-full size-1 queue for live RTSP streams and simulated real-time playback.
+  - `direct`: Synchronous, blocking sequential reads without dropping frames; ideal for offline batch benchmarking or processing pre-recorded test datasets where every frame must be evaluated.
+- **Playback Pacing (`--pace-files` / `PACE_FILES=1`)**: When running against recorded video files in `threaded` mode, playback is paced to match the file's native FPS (e.g. 30 FPS). This prevents file playback from flooding CPU/GPU at 200+ FPS and realistically replicates real-time RTSP production conditions.
+
+```bash
+# Production live RTSP feed with threaded zero-drift capture (default)
+python main.py --source rtsp -v "rtsp://camera.local:554/stream1" --capture-mode threaded
+
+# Offline batch file processing: analyze every frame as fast as possible
+python main.py -v /path/to/batch.mp4 --capture-mode direct --no-pace-files
+```
+
+---
+
+## Multi-Object Tracking (ByteTrack & Centroid Fallback)
+
+Conveyor lines in poultry processing facilities present severe tracking challenges: rapid carcass movement, dense shackle spacing, temporary occlusion, and fluctuating lighting conditions.
+
+### Modern ByteTrack Tracking
+The service integrates **ByteTrack** as its primary multi-object tracking algorithm:
+- **Two-Stage Association**: Instead of discarding low-confidence bounding box detections (e.g., partially occluded shackles or distant silhouettes), ByteTrack associates high-confidence detections first, then uses low-confidence detections in a second matching stage to preserve trajectories across momentary occlusions.
+- **Kalman Filter Motion Prediction**: Predicts bounding box locations frame-over-frame using velocity and position state estimation, handling non-linear jerky motion and conveyor vibration.
+- **Supervision & Trackers Integration**: Employs an internal adapter (`_ByteTrackAdapter`) supporting both `trackers` (v2.6.0+) and `supervision` libraries.
+
+### Exactly-Once Counting Guarantees
+- **VirtualLineZone Vector Geometry**: Conveyor counting uses continuous crossing vectors evaluated against the virtual counting line. The intersection test evaluates orientation cross-products (`(p1, p2)` movement across `(start, end)` line) and directional alignment (`down`, `up`, `left`, `right`).
+- **Deterministic Deduplication**: Each tracked entity maintains a persistent integer `tracker_id`. Once a trajectory crosses the virtual zone, its ID is committed to the counter's `counted_track_ids` set. Even if a carcass lingers or oscillates near the line boundary, it is counted **exactly once**.
+
+### Graceful Centroid Fallback
+If ByteTrack dependencies (`trackers` or `supervision`) are missing or cannot be imported in the edge environment:
+- The service logs an informational notice and automatically falls back to `CentroidTracker`.
+- Centroid tracking computes Euclidean center coordinates and matches nearest points up to `--max-distance` (default 60 pixels), providing zero-dependency tracking on minimal edge appliances.
+
+```bash
+# Run with modern ByteTrack (default)
+python main.py -v conveyor.mp4 --tracker-type bytetrack
+
+# Explicitly force lightweight Centroid tracking
+python main.py -v conveyor.mp4 --tracker-type centroid
+```
+
+---
+
+## Hardware Acceleration & ONNX Execution Providers
+
+The ONNX YOLO detection engine (`src.detection.detector.ONNXDetector`) features dynamic hardware provider auto-negotiation and resilient fallback.
+
+### Auto-Priority Cascade
+When `--onnx-providers auto` (or `ONNX_PROVIDERS=auto`) is active, the detector queries ONNX Runtime for all available hardware acceleration providers on the host system via `ort.get_available_providers()` and selects the highest-priority accelerator available:
+
+```text
+Priority Cascade:
+  1. CUDAExecutionProvider        (Nvidia GPUs)
+  2. TensorrtExecutionProvider    (Nvidia TensorRT optimized engine)
+  3. OpenVINOExecutionProvider    (Intel CPUs, iGPUs, VPUs, Arc discrete GPUs)
+  4. DirectMLExecutionProvider    (Windows DirectX 12 / AMD / Intel / Qualcomm)
+  5. CoreMLExecutionProvider      (Apple Silicon M-series & macOS)
+  6. CPUExecutionProvider         (Universal fallback, always active)
+```
+
+### Resilient Runtime Fallback
+Edge environments often encounter subtle driver or library mismatches (for example, missing CUDA runtime libraries, outdated Intel OpenVINO DLLs, or unsupported GPU architectures).
+- If session initialization fails on the selected hardware provider, the error is logged as a warning.
+- The detector **automatically catches the initialization failure** and immediately retries session creation with `['CPUExecutionProvider']`.
+- This ensures the edge counter service never crashes on startup due to GPU/NPU driver faults.
+
+### Specifying Explicit Providers
+You can configure providers via the CLI or environment variables:
+- **`--onnx-providers auto`**: (Default) Discovers and chooses the best available hardware accelerator.
+- **Explicit Comma-Separated List**: Pass specific providers in order of preference, e.g.:
+  - `--onnx-providers OpenVINOExecutionProvider,CPUExecutionProvider`
+  - `--onnx-providers CUDAExecutionProvider,CPUExecutionProvider`
+  - `CPUExecutionProvider` is automatically appended to explicit lists as a safety guarantee.
+
+```bash
+# Auto-detect best hardware accelerator (CUDA, OpenVINO, DirectML, etc.)
+python main.py -m models/yolo26m.onnx --detector onnx --onnx-providers auto
+
+# Intel edge appliance: force OpenVINO with CPU fallback
+python main.py -m models/yolo26m.onnx --detector onnx --onnx-providers OpenVINOExecutionProvider,CPUExecutionProvider
+```
 
 ---
 
@@ -84,18 +184,32 @@ The service entrypoint is `main.py`. You can configure execution using command-l
    python main.py --source synthetic --show-window
    ```
 
-2. **Run on Video File with Central API Sync & Authentication:**
+2. **Live RTSP Camera Stream with ByteTrack and Hardware Acceleration:**
+   ```bash
+   python main.py \
+     --source rtsp \
+     --video "rtsp://camera.local:554/live" \
+     --capture-mode threaded \
+     --tracker-type bytetrack \
+     --model models/yolo26m.onnx \
+     --detector onnx \
+     --onnx-providers auto \
+     --line-id line-1
+   ```
+
+3. **Run on Video File with Central API Sync & Authentication:**
    ```bash
    python main.py \
      --video /path/to/conveyor_sample.mp4 \
      --line-id line-1 \
      --direction right \
+     --tracker-type bytetrack \
      --api-sync-url http://localhost:8000/api/v1/sync/batch \
      --api-token cdc_live_xxxxxxxxxxxxxxxxxxxxxxxx \
      --loop
    ```
 
-3. **Standalone Mode (No network sync, local storage only):**
+4. **Standalone Mode (No network sync, local storage only):**
    ```bash
    python main.py \
      --video /path/to/conveyor_sample.mp4 \
@@ -104,12 +218,25 @@ The service entrypoint is `main.py`. You can configure execution using command-l
      --show-window
    ```
 
+5. **Timed Test / Benchmark Run (30 seconds duration):**
+   ```bash
+   python main.py \
+     --video /path/to/conveyor_sample.mp4 \
+     --duration 30.0 \
+     --no-sync
+   ```
+
 ### Command Line Options
 
 | Option | Flag | Default | Description |
 |---|---|---|---|
 | `--video` | `-v` | `""` | Path to video file (`.mp4`, `.mov`, `.avi`, `.mkv`). Sets source type to `file`. |
 | `--source` | | `synthetic` | Video source type: `synthetic`, `file`, or `rtsp`. |
+| `--capture-mode` | | `threaded` | Video capture ingestion mode: `threaded` (background thread with bounded size-1 queue for zero RTSP latency accumulation) or `direct` (blocking synchronous read). |
+| `--pace-files` / `--no-pace-files` | | `True` | Pace video file playback to native FPS in threaded mode to emulate real-time stream ingestion. |
+| `--tracker-type` | | `bytetrack` | Multi-object tracking algorithm: `bytetrack` (Kalman filter + dual-stage IoU association) or `centroid` (Euclidean distance matching). |
+| `--onnx-providers` | | `auto` | Execution providers for ONNX Runtime inference: `auto` (priority cascade: `CUDA -> TensorRT -> OpenVINO -> DirectML -> CoreML -> CPU`) or comma-separated provider names. |
+| `--duration` | `-d` | `None` | Maximum service runtime duration in seconds before stopping cleanly (e.g. `30.0`). |
 | `--line-id` | | `lineA` | Conveyor line identifier (e.g. `line-1`, `lineA`). |
 | `--model` | `-m` | `""` | Path to ONNX YOLO model file (optional). |
 | `--detector` | | `auto` | Detector engine: `auto`, `shackle`, `mock`, or `onnx`. |
@@ -142,6 +269,11 @@ All command-line arguments can also be set via environment variables or a `.env`
 | `LINE_ID` | `line-1` | Line identifier matching registered lines in central API |
 | `VIDEO_PATH` | `/samples/Rekaman_2.MOV` | Video file path inside container or host |
 | `VIDEO_SOURCE_TYPE` | `synthetic` | `synthetic`, `file`, or `rtsp` |
+| `CAPTURE_MODE` | `threaded` | Video capture mode: `threaded` (background thread with drop-on-full size-1 queue) or `direct` (blocking synchronous) |
+| `PACE_FILES` | `1` | `1` to pace file video playback to native FPS in threaded mode, `0` for unthrottled processing speed |
+| `TRACKER_TYPE` | `bytetrack` | Multi-object tracking algorithm: `bytetrack` or `centroid` |
+| `ONNX_PROVIDERS` | `auto` | ONNX execution providers: `auto` (hardware priority cascade) or comma-separated list (e.g. `OpenVINOExecutionProvider,CPUExecutionProvider`) |
+| `DURATION_SEC` | `0.0` | Maximum service runtime in seconds before stopping (`0.0` or unset runs indefinitely) |
 | `SAMPLES_DIR` | `./samples` | Host directory containing video files for volume mount |
 | `LOOP_VIDEO` | `1` | `1` to loop video endlessly, `0` to stop at EOF |
 | `LINE_DIRECTION` | `right` | Crossing trigger direction (`right`, `left`, `down`, `up`) |
