@@ -1154,6 +1154,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Seconds between background sync attempts",
     )
     parser.add_argument(
+        "--immediate-sync",
+        dest="immediate_sync",
+        action="store_true",
+        default=os.getenv("IMMEDIATE_SYNC", "1").lower() in ("1", "true", "yes"),
+        help="Enable immediate outbox sync dispatch upon each count event (default: True)",
+    )
+    parser.add_argument(
+        "--no-immediate-sync",
+        dest="immediate_sync",
+        action="store_false",
+        help="Disable immediate count event outbox sync; use periodic interval only",
+    )
+    parser.add_argument(
         "--aggregate-window",
         type=float,
         default=float(os.getenv("AGGREGATE_WINDOW_SEC", "60.0")),
@@ -1376,6 +1389,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         line_coords=line_coords,
         line_direction=args.direction,
         enable_sync=enable_sync,
+        enable_immediate_sync=args.immediate_sync,
         cli_display=True,
         show_window=args.show_window,
         enable_stream_relay=args.enable_stream_relay,

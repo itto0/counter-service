@@ -1064,6 +1064,45 @@ def test_counter_service_cleanup_sets_sync_trigger(tmp_path):
     assert service._sync_trigger.is_set()
 
 
+def test_parse_args_immediate_sync_flags(monkeypatch):
+    """Verify CLI flags --immediate-sync and --no-immediate-sync and IMMEDIATE_SYNC env var."""
+    from main import parse_args
+
+    # 1. Default without flags or env
+    monkeypatch.delenv("IMMEDIATE_SYNC", raising=False)
+    args = parse_args([])
+    assert args.immediate_sync is True
+
+    # 2. Flag --no-immediate-sync
+    args_no = parse_args(["--no-immediate-sync"])
+    assert args_no.immediate_sync is False
+
+    # 3. Explicit flag --immediate-sync
+    args_yes = parse_args(["--immediate-sync"])
+    assert args_yes.immediate_sync is True
+
+    # 4. Environment variable false
+    monkeypatch.setenv("IMMEDIATE_SYNC", "0")
+    args_env_false = parse_args([])
+    assert args_env_false.immediate_sync is False
+
+    # 5. Environment variable true
+    monkeypatch.setenv("IMMEDIATE_SYNC", "true")
+    args_env_true = parse_args([])
+    assert args_env_true.immediate_sync is True
+
+
+def test_main_passes_immediate_sync_to_service():
+    """Verify main() forwards enable_immediate_sync argument to CounterService."""
+    with patch("main.CounterService") as mock_service_cls:
+        instance = mock_service_cls.return_value
+        instance.run.return_value = 0
+        main(["--no-immediate-sync", "--no-sync", "--max-frames", "1"])
+        call_kwargs = mock_service_cls.call_args.kwargs
+        assert call_kwargs.get("enable_immediate_sync") is False
+
+
+
 
 
 
