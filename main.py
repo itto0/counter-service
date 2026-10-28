@@ -298,11 +298,12 @@ class CounterService:
         self._smoothed_accuracy_pct: Optional[float] = None
         if accuracy_ema_alpha is None and pipeline_config is not None:
             accuracy_ema_alpha = getattr(pipeline_config, "accuracy_ema_alpha", None)
-        self.accuracy_ema_alpha: float = (
-            float(accuracy_ema_alpha)
-            if accuracy_ema_alpha is not None
-            else float(os.getenv("ACCURACY_EMA_ALPHA", "0.15"))
-        )
+        raw_alpha = accuracy_ema_alpha if accuracy_ema_alpha is not None else (os.getenv("ACCURACY_EMA_ALPHA") or "0.15")
+        try:
+            parsed_alpha = float(raw_alpha)
+        except (ValueError, TypeError):
+            parsed_alpha = 0.15
+        self.accuracy_ema_alpha: float = min(1.0, max(0.01, parsed_alpha))
 
         # Storage
         self.storage = storage or LocalStorage(db_path=self.db_path)
@@ -516,7 +517,7 @@ class CounterService:
         )
         if dynamic_acc is not None:
             if self._smoothed_accuracy_pct is None:
-                self._smoothed_accuracy_pct = dynamic_acc
+                self._smoothed_accuracy_pct = round(min(100.0, max(0.0, dynamic_acc)), 2)
             else:
                 alpha = self.accuracy_ema_alpha
                 blended = (alpha * dynamic_acc) + ((1.0 - alpha) * self._smoothed_accuracy_pct)
