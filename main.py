@@ -293,6 +293,7 @@ class CounterService:
         self._health_frame_count = 0
         self._health_latencies_ms: list[float] = []
         self._all_latencies_ms: list[float] = []
+        self._last_active_accuracy_pct: Optional[float] = None
 
         # Storage
         self.storage = storage or LocalStorage(db_path=self.db_path)
@@ -499,6 +500,30 @@ class CounterService:
         elif stream_state == "ONLINE" and fps < 5.0 and self.total_frames_processed > 0:
             stream_state = "DEGRADED"
 
+        dynamic_acc = (
+            self.counter.get_tracking_accuracy_pct(reset_window=True)
+            if hasattr(self, "counter") and hasattr(self.counter, "get_tracking_accuracy_pct")
+            else None
+        )
+        if dynamic_acc is not None:
+            self._last_active_accuracy_pct = dynamic_acc
+            current_acc = dynamic_acc
+        else:
+            # Conveyor idle: fall back to last active reading, or static model accuracy
+            current_acc = (
+                self._last_active_accuracy_pct
+                if self._last_active_accuracy_pct is not None
+                else self.model_accuracy_pct
+            )
+
+        if current_acc is not None and current_acc < 80.0:
+            logger.warning(
+                "Operational tracking accuracy degraded: %.1f%% (FPS=%.1f, latency_p95=%.1fms)",
+                current_acc,
+                fps,
+                latency_p95,
+            )
+
         health = HealthSampleDTO(
             fps=round(fps, 1),
             latency_p95_ms=round(latency_p95, 2),
@@ -509,7 +534,7 @@ class CounterService:
             if hasattr(self.detector, "model_name") and isinstance(self.detector.model_name, str)
             else "yolo26n",
             model_version="v1.0",
-            accuracy_pct=self.model_accuracy_pct,
+            accuracy_pct=current_acc,
         )
         try:
             self.storage.insert_health(self.line_id, health)
