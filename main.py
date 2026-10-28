@@ -516,7 +516,7 @@ class CounterService:
                 else self.model_accuracy_pct
             )
 
-        if current_acc is not None and current_acc < 80.0:
+        if stream_state != "IDLE" and current_acc is not None and current_acc < 80.0:
             logger.warning(
                 "Operational tracking accuracy degraded: %.1f%% (FPS=%.1f, latency_p95=%.1fms)",
                 current_acc,

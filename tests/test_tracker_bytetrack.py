@@ -177,3 +177,38 @@ def test_bytetrack_completion_accuracy():
     assert counter.total_count == 1
     assert counter.get_tracking_accuracy_pct(reset_window=False) == 100.0
 
+
+def test_bytetrack_completion_accuracy_with_lost_tracks():
+    """Verify ByteTrack properly computes completion accuracy when tracks expire uncounted."""
+    line = VirtualLineZone(start=(0, 200), end=(400, 200), direction="down")
+    counter = ChickenCounter(
+        line_zone=line,
+        tracker_type="bytetrack",
+        max_age=2,
+        track_thresh=0.25,
+        match_thresh=0.7,
+    )
+
+    # Track 1 crosses
+    det1_a = [Detection(bbox=(180, 95, 220, 190), confidence=0.9, class_name="chicken")]
+    counter.update(det1_a, timestamp=1000.0)
+    det1_b = [Detection(bbox=(180, 107, 220, 202), confidence=0.9, class_name="chicken")]
+    counter.update(det1_b, timestamp=1000.033)
+
+    assert counter.total_count == 1
+
+    # Track 2 appears for 2 frames then disappears without crossing
+    det2_a = [Detection(bbox=(50, 50, 90, 90), confidence=0.9, class_name="chicken")]
+    counter.update(det2_a, timestamp=1000.066)
+    det2_b = [Detection(bbox=(50, 55, 90, 95), confidence=0.9, class_name="chicken")]
+    counter.update(det2_b, timestamp=1000.100)
+
+    # Advance empty frames until Track 2 expires
+    for i in range(5):
+        counter.update([], timestamp=1000.133 + (i * 0.033))
+
+    # 1 completed, 1 lost -> 50.0%
+    acc = counter.get_tracking_accuracy_pct(reset_window=True)
+    assert acc == 50.0
+
+
