@@ -203,6 +203,7 @@ class CounterService:
         pipeline_config: Optional[Any] = None,
         track_thresh: float = 0.4,
         match_thresh: float = 0.7,
+        accuracy_ema_alpha: Optional[float] = None,
     ) -> None:
         self.line_id = line_id
         self.video_source_type = video_source_type.lower()
@@ -294,6 +295,14 @@ class CounterService:
         self._health_latencies_ms: list[float] = []
         self._all_latencies_ms: list[float] = []
         self._last_active_accuracy_pct: Optional[float] = None
+        self._smoothed_accuracy_pct: Optional[float] = None
+        if accuracy_ema_alpha is None and pipeline_config is not None:
+            accuracy_ema_alpha = getattr(pipeline_config, "accuracy_ema_alpha", None)
+        self.accuracy_ema_alpha: float = (
+            float(accuracy_ema_alpha)
+            if accuracy_ema_alpha is not None
+            else float(os.getenv("ACCURACY_EMA_ALPHA", "0.15"))
+        )
 
         # Storage
         self.storage = storage or LocalStorage(db_path=self.db_path)
@@ -506,14 +515,24 @@ class CounterService:
             else None
         )
         if dynamic_acc is not None:
-            self._last_active_accuracy_pct = dynamic_acc
-            current_acc = dynamic_acc
+            if self._smoothed_accuracy_pct is None:
+                self._smoothed_accuracy_pct = dynamic_acc
+            else:
+                alpha = self.accuracy_ema_alpha
+                blended = (alpha * dynamic_acc) + ((1.0 - alpha) * self._smoothed_accuracy_pct)
+                self._smoothed_accuracy_pct = round(min(100.0, max(0.0, blended)), 2)
+            self._last_active_accuracy_pct = self._smoothed_accuracy_pct
+            current_acc = self._smoothed_accuracy_pct
         else:
-            # Conveyor idle: fall back to last active reading, or static model accuracy
+            # Conveyor idle: fall back to smoothed score, last active reading, or static model accuracy
             current_acc = (
-                self._last_active_accuracy_pct
-                if self._last_active_accuracy_pct is not None
-                else self.model_accuracy_pct
+                self._smoothed_accuracy_pct
+                if self._smoothed_accuracy_pct is not None
+                else (
+                    self._last_active_accuracy_pct
+                    if self._last_active_accuracy_pct is not None
+                    else self.model_accuracy_pct
+                )
             )
 
         if stream_state != "IDLE" and current_acc is not None and current_acc < 80.0:
