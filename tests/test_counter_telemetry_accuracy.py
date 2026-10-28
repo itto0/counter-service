@@ -2,7 +2,7 @@
 
 import logging
 from unittest.mock import MagicMock
-import pytest
+
 from main import CounterService
 from src.storage.db import LocalStorage
 
