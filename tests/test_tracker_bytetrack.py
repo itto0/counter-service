@@ -153,3 +153,27 @@ def test_bytetrack_reverse_direction_not_counted():
     events3 = counter.update(det3, timestamp=1000.066)
     assert events3 == []
     assert counter.total_count == 0
+
+
+def test_bytetrack_completion_accuracy():
+    """Verify ByteTrack properly computes completion accuracy when objects cross and expire."""
+    line = VirtualLineZone(start=(0, 200), end=(400, 200), direction="down")
+    counter = ChickenCounter(
+        line_zone=line,
+        tracker_type="bytetrack",
+        max_age=2,
+        track_thresh=0.25,
+        match_thresh=0.7,
+    )
+
+    # Frame 1: Detection above line
+    det1 = [Detection(bbox=(180, 95, 220, 190), confidence=0.9, class_name="chicken")]
+    counter.update(det1, timestamp=1000.0)
+
+    # Frame 2: Crossing
+    det2 = [Detection(bbox=(180, 107, 220, 202), confidence=0.9, class_name="chicken")]
+    counter.update(det2, timestamp=1000.033)
+
+    assert counter.total_count == 1
+    assert counter.get_tracking_accuracy_pct(reset_window=False) == 100.0
+

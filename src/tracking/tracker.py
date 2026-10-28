@@ -215,6 +215,11 @@ class ChickenCounter:
         self.tracks: dict[int, TrackedObject] = {}
         self.counted_track_ids: set[int] = set()
         self._next_track_id = 1
+        self._window_completed_tracks: int = 0
+        self._window_lost_tracks: int = 0
+        self._total_completed_tracks: int = 0
+        self._total_lost_tracks: int = 0
+        self._min_track_hits: int = 2
 
         if tracker_type.lower() == "bytetrack":
             if HAS_BYTETRACK and ByteTrackTracker is not None:
@@ -337,7 +342,7 @@ class ChickenCounter:
                         class_name=class_name,
                         confidence=confidence,
                         missed_frames=0,
-                        age=0,
+                        age=1,
                         counted=False,
                     )
                     self.tracks[track_id] = track
@@ -347,6 +352,8 @@ class ChickenCounter:
                         track.counted = True
                         self.counted_track_ids.add(track_id)
                         self.total_count += 1
+                        self._window_completed_tracks += 1
+                        self._total_completed_tracks += 1
                         events.append(
                             CountEventDTO(
                                 track_id=track_id,
@@ -362,12 +369,15 @@ class ChickenCounter:
         for track_id, track in self.tracks.items():
             if track_id not in active_track_ids:
                 track.missed_frames += 1
-                track.age += 1
                 max_allowed_missed = min(self.max_age, 3) if track.counted else self.max_age
                 if track.missed_frames > max_allowed_missed:
                     stale_ids.append(track_id)
 
         for track_id in stale_ids:
+            track = self.tracks[track_id]
+            if not track.counted and track.age >= self._min_track_hits:
+                self._window_lost_tracks += 1
+                self._total_lost_tracks += 1
             del self.tracks[track_id]
 
         return events
@@ -423,6 +433,8 @@ class ChickenCounter:
                     track.counted = True
                     self.counted_track_ids.add(track_id)
                     self.total_count += 1
+                    self._window_completed_tracks += 1
+                    self._total_completed_tracks += 1
                     events.append(
                         CountEventDTO(
                             track_id=track_id,
@@ -448,7 +460,7 @@ class ChickenCounter:
                     class_name=det.class_name,
                     confidence=det.confidence,
                     missed_frames=0,
-                    age=0,
+                    age=1,
                     counted=False,
                 )
                 newly_created_ids.add(new_id)
@@ -458,12 +470,30 @@ class ChickenCounter:
         for track_id, track in self.tracks.items():
             if track_id not in matched_track_ids and track_id not in newly_created_ids:
                 track.missed_frames += 1
-                track.age += 1
                 max_allowed_missed = min(self.max_age, 3) if track.counted else self.max_age
                 if track.missed_frames > max_allowed_missed:
                     stale_ids.append(track_id)
 
         for track_id in stale_ids:
+            track = self.tracks[track_id]
+            if not track.counted and track.age >= self._min_track_hits:
+                self._window_lost_tracks += 1
+                self._total_lost_tracks += 1
             del self.tracks[track_id]
 
         return events
+
+    def get_tracking_accuracy_pct(self, reset_window: bool = True) -> float | None:
+        """Calculate tracking completion accuracy percentage for the current window.
+
+        Returns:
+            Accuracy percentage in range [0.0, 100.0] or None if no tracks finished in window.
+        """
+        total = self._window_completed_tracks + self._window_lost_tracks
+        if total == 0:
+            return None
+        acc = (self._window_completed_tracks / total) * 100.0
+        if reset_window:
+            self._window_completed_tracks = 0
+            self._window_lost_tracks = 0
+        return round(min(100.0, max(0.0, acc)), 2)

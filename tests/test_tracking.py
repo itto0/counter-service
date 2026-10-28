@@ -646,3 +646,78 @@ def test_active_track_priority_prevents_stale_track_theft():
     assert counter.tracks[2].counted is True
 
 
+def test_tracker_completion_accuracy_healthy():
+    """Verify 100% accuracy when all valid tracks cross the line."""
+    line = VirtualLineZone(start=(0, 200), end=(640, 200), direction="down")
+    counter = ChickenCounter(line_zone=line)
+
+    # Track 1 crosses
+    det1_a = Detection(x1=100, y1=150, x2=140, y2=190, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det1_a])
+    det1_b = Detection(x1=100, y1=170, x2=140, y2=215, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det1_b])
+
+    assert counter.total_count == 1
+    acc = counter.get_tracking_accuracy_pct(reset_window=False)
+    assert acc == 100.0
+
+
+def test_tracker_completion_accuracy_with_lost_tracks():
+    """Verify accuracy drops when tracks die before crossing."""
+    line = VirtualLineZone(start=(0, 200), end=(640, 200), direction="down")
+    counter = ChickenCounter(line_zone=line, max_age=2)
+
+    # Track 1 crosses
+    det1_a = Detection(x1=100, y1=150, x2=140, y2=190, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det1_a])
+    det1_b = Detection(x1=100, y1=170, x2=140, y2=215, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det1_b])
+
+    # Track 2 appears for 2 frames then disappears without crossing
+    det2_a = Detection(x1=300, y1=50, x2=340, y2=90, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det2_a])
+    det2_b = Detection(x1=300, y1=60, x2=340, y2=100, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det2_b])
+
+    # Advance 4 empty frames to prune Track 2 (max_age=2)
+    for _ in range(4):
+        counter.update([])
+
+    # 1 completed, 1 lost -> 50.0%
+    acc = counter.get_tracking_accuracy_pct(reset_window=True)
+    assert acc == 50.0
+
+
+def test_tracker_completion_accuracy_ignores_single_frame_noise():
+    """Verify single-frame transient detections do not count as lost carcass tracks."""
+    line = VirtualLineZone(start=(0, 200), end=(640, 200), direction="down")
+    counter = ChickenCounter(line_zone=line, max_age=2)
+
+    # Track 1 crosses
+    det1_a = Detection(x1=100, y1=150, x2=140, y2=190, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det1_a])
+    det1_b = Detection(x1=100, y1=170, x2=140, y2=215, confidence=0.9, class_id=0, class_name="chicken")
+    counter.update([det1_b])
+
+    # Spurious 1-frame noise detection
+    noise = Detection(x1=500, y1=50, x2=510, y2=60, confidence=0.5, class_id=0, class_name="chicken")
+    counter.update([noise])
+
+    # Advance 4 empty frames to prune noise
+    for _ in range(4):
+        counter.update([])
+
+    # 1 completed, noise ignored -> 100.0%
+    acc = counter.get_tracking_accuracy_pct(reset_window=True)
+    assert acc == 100.0
+
+
+def test_tracker_completion_accuracy_idle_returns_none():
+    """Verify get_tracking_accuracy_pct returns None when no tracks terminate in the window."""
+    line = VirtualLineZone(start=(0, 200), end=(640, 200), direction="down")
+    counter = ChickenCounter(line_zone=line)
+
+    assert counter.get_tracking_accuracy_pct() is None
+
+
+
