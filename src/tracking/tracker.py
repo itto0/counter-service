@@ -241,6 +241,11 @@ class ChickenCounter:
             self.tracker_type = "centroid"
             self._bytetrack = None
 
+    def reset_count(self) -> None:
+        """Reset running total count to zero (e.g. on new batch start)."""
+        self.total_count = 0
+        self.counted_track_ids.clear()
+
     def update(
         self,
         detections: list[Detection],
