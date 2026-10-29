@@ -436,7 +436,7 @@ class LocalStorage:
                     WHERE synced_at IS NULL AND status = 'COMPLETED'
                 """
                 params: list[Any] = []
-                if line_id:
+                if line_id is not None:
                     query += " AND line_id = ?"
                     params.append(line_id)
                 query += " ORDER BY id ASC LIMIT ?"

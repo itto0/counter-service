@@ -436,8 +436,15 @@ class CounterService:
         # Batch manager
         if batch_manager is not None:
             self.batch_manager = batch_manager
-            if getattr(self.batch_manager, "on_batch_start", None) is None:
+            prev_callback = getattr(self.batch_manager, "on_batch_start", None)
+            if prev_callback is None:
                 self.batch_manager.on_batch_start = self._on_batch_start
+            else:
+                def chained_on_batch_start(batch_id: str, prev=prev_callback) -> None:
+                    self._on_batch_start(batch_id)
+                    prev(batch_id)
+
+                self.batch_manager.on_batch_start = chained_on_batch_start
         else:
             self.batch_manager = BatchManager(
                 line_id=self.line_id,

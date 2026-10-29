@@ -33,6 +33,26 @@ def test_counting_batch_dto():
     assert batch.status == "ACTIVE"
 
 
+def test_counting_batch_dto_validation():
+    from pydantic import ValidationError
+    from src.contracts import CountingBatchDTO
+
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValidationError):
+        CountingBatchDTO(
+            batch_id="b1",
+            start_time=now,
+            total_count=-1,
+        )
+
+    with pytest.raises(ValidationError):
+        CountingBatchDTO(
+            batch_id="b1",
+            start_time=now,
+            status="INVALID_STATUS",  # type: ignore[arg-type]
+        )
+
+
 def test_count_event_and_sync_payload_with_batches():
     from src.contracts import CountEventDTO, CountingBatchDTO, SyncBatchPayload
 

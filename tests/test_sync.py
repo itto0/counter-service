@@ -353,3 +353,91 @@ def test_sync_dispatcher_pushes_completed_batches_and_marks_synced(tmp_path):
     assert sent_payload["batches"][0]["batch_id"] == "line-1_20261029_090000"
 
 
+def test_sync_dispatcher_composite_events_aggregates_health_and_batches(tmp_path):
+    storage = LocalStorage(db_path=str(tmp_path / "sync_composite.db"))
+    storage.init_db()
+
+    now = datetime.now(timezone.utc)
+    batch_id = "lineA_20261029_110000"
+
+    # 1. Event with batch_id
+    storage.insert_event(
+        "lineA",
+        CountEventDTO(track_id=1, ts_utc=now, confidence=0.92, batch_id=batch_id),
+    )
+
+    # 2. Window aggregate
+    storage.insert_aggregate(
+        "lineA",
+        CountAggregateDTO(
+            window_start=now,
+            window_end=now,
+            count=10,
+            rate_per_min=60.0,
+            confidence_avg=0.95,
+            status="NORMAL",
+        ),
+    )
+
+    # 3. Health sample
+    storage.insert_health(
+        "lineA",
+        HealthSampleDTO(
+            fps=30.0,
+            latency_p95_ms=11.5,
+            cpu_pct=40.0,
+            mem_pct=50.0,
+            stream_state="ONLINE",
+            model_name="yolo26n",
+            model_version="v1.0",
+        ),
+    )
+
+    # 4. Completed batch
+    batch = CountingBatchDTO(
+        batch_id=batch_id,
+        line_id="lineA",
+        start_time=now,
+        finish_time=now,
+        total_count=10,
+        status="COMPLETED",
+    )
+    storage.start_batch(batch)
+    storage.finish_batch(batch_id, finish_time=now, total_count=10)
+
+    mock_http_client = MagicMock()
+    mock_http_client.post.return_value.status_code = 200
+
+    dispatcher = OutboxSyncDispatcher(
+        storage=storage,
+        api_url="http://mock-api/api/v1/sync/batch",
+        line_id="lineA",
+        http_client=mock_http_client,
+    )
+
+    synced_count = dispatcher.sync_once()
+    assert synced_count == 4
+
+    # Verify all items marked synced
+    assert len(storage.get_unsynced_events(line_id="lineA")) == 0
+    assert len(storage.get_unsynced_aggregates(line_id="lineA")) == 0
+    assert len(storage.get_unsynced_health(line_id="lineA")) == 0
+    assert len(storage.get_unsynced_batches(line_id="lineA")) == 0
+
+    # Verify posted payload
+    mock_http_client.post.assert_called_once()
+    _, kwargs = mock_http_client.post.call_args
+    posted_json = kwargs["json"]
+    assert posted_json["line_id"] == "lineA"
+    assert len(posted_json["events"]) == 1
+    assert posted_json["events"][0]["batch_id"] == batch_id
+    assert len(posted_json["aggregates"]) == 1
+    assert posted_json["aggregates"][0]["count"] == 10
+    assert posted_json["health"]["fps"] == 30.0
+    assert len(posted_json["batches"]) == 1
+    assert posted_json["batches"][0]["batch_id"] == batch_id
+    assert posted_json["batches"][0]["total_count"] == 10
+    assert posted_json["batches"][0]["status"] == "COMPLETED"
+
+
+

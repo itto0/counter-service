@@ -83,6 +83,35 @@ def test_counter_service_batch_initialization_custom_and_precedence(tmp_path, mo
     assert s4.batch_manager.on_batch_start == s4._on_batch_start
 
 
+def test_counter_service_chains_existing_batch_start_callback(tmp_path):
+    """Verify CounterService chains with any existing on_batch_start callback on batch_manager."""
+    db_file = str(tmp_path / "test_chain.db")
+    storage = LocalStorage(db_path=db_file)
+
+    called_with = []
+
+    def custom_callback(batch_id: str) -> None:
+        called_with.append(batch_id)
+
+    custom_mgr = BatchManager(
+        line_id="custom_line",
+        storage=storage,
+        on_batch_start=custom_callback,
+    )
+    service = CounterService(
+        line_id="custom_line",
+        storage=storage,
+        enable_sync=False,
+        batch_manager=custom_mgr,
+    )
+
+    service.counter.total_count = 10
+    service.batch_manager.on_batch_start("test_batch_123")
+
+    assert service.counter.total_count == 0
+    assert called_with == ["test_batch_123"]
+
+
 def test_counter_service_on_batch_start_resets_counter(tmp_path):
     """Verify _on_batch_start resets counter.total_count and clears counted_track_ids."""
     db_file = str(tmp_path / "test_reset.db")
