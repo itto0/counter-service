@@ -10,18 +10,12 @@ from typing import Optional
 try:
     from src.contracts import CountingBatchDTO
 except ImportError:
-    try:
-        from src.contracts import CountingBatchDTO
-    except ImportError:
-        from shared.contracts import CountingBatchDTO
+    from shared.contracts import CountingBatchDTO
 
 try:
     from src.storage.db import LocalStorage
 except ImportError:
-    try:
-        from src.storage.db import LocalStorage
-    except ImportError:
-        from storage.db import LocalStorage
+    from storage.db import LocalStorage
 
 logger = logging.getLogger("counter.batch")
 
@@ -82,7 +76,7 @@ class BatchManager:
     def _generate_batch_id(self, now: datetime) -> str:
         """Generate a formatted batch ID: [<prefix>_]<line_id>_YYYYMMDD_HHMMSS."""
         timestamp_str = now.strftime("%Y%m%d_%H%M%S")
-        prefix = f"{self.batch_prefix}_" if self.batch_prefix else ""
+        prefix = f"{self.batch_prefix.rstrip('_')}_" if self.batch_prefix else ""
         return f"{prefix}{self.line_id}_{timestamp_str}"
 
     def on_activity(
@@ -101,8 +95,12 @@ class BatchManager:
         Returns:
             The current active CountingBatchDTO.
         """
+        count_increment = max(0, count_increment)
         now_p = float(now_perf) if now_perf is not None else time.perf_counter()
         now_u = now_utc if now_utc is not None else datetime.now(timezone.utc)
+
+        callback = None
+        b_id = None
 
         with self._lock:
             self._last_activity_perf = now_p
@@ -122,12 +120,8 @@ class BatchManager:
                     except Exception as e:
                         logger.error("Failed to persist batch start: %s", e)
 
-                if self.on_batch_start:
-                    try:
-                        self.on_batch_start(batch_id)
-                    except Exception as e:
-                        logger.error("Error in on_batch_start callback: %s", e)
-
+                callback = self.on_batch_start
+                b_id = batch_id
                 logger.info("Batch started: %s (line: %s)", batch_id, self.line_id)
             else:
                 if count_increment > 0 and self._current_batch:
@@ -140,7 +134,15 @@ class BatchManager:
                         except Exception as e:
                             logger.error("Failed to update batch count: %s", e)
 
-            return self._current_batch
+            batch = self._current_batch
+
+        if callback and b_id:
+            try:
+                callback(b_id)
+            except Exception as e:
+                logger.error("Error in on_batch_start callback: %s", e)
+
+        return batch
 
     def check_idle_timeout(
         self,
@@ -156,15 +158,16 @@ class BatchManager:
         Returns:
             The completed CountingBatchDTO if timed out, None otherwise.
         """
+        now_p = float(now_perf) if now_perf is not None else time.perf_counter()
+        now_u = now_utc if now_utc is not None else datetime.now(timezone.utc)
+
         with self._lock:
             if not self.is_active or self._current_batch is None:
                 return None
+            if (now_p - self._last_activity_perf) < self.idle_timeout_sec:
+                return None
 
-            now_p = float(now_perf) if now_perf is not None else time.perf_counter()
-            if (now_p - self._last_activity_perf) >= self.idle_timeout_sec:
-                now_u = now_utc if now_utc is not None else datetime.now(timezone.utc)
-                return self._complete_batch(now_u)
-            return None
+        return self._complete_batch(now_u)
 
     def force_finish(
         self,
@@ -178,30 +181,32 @@ class BatchManager:
         Returns:
             The completed CountingBatchDTO if a batch was active, None otherwise.
         """
-        with self._lock:
-            if not self.is_active or self._current_batch is None:
-                return None
-            now_u = now_utc if now_utc is not None else datetime.now(timezone.utc)
-            return self._complete_batch(now_u)
+        now_u = now_utc if now_utc is not None else datetime.now(timezone.utc)
+        return self._complete_batch(now_u)
 
-    def _complete_batch(self, finish_utc: datetime) -> CountingBatchDTO:
+    def _complete_batch(self, finish_utc: datetime) -> Optional[CountingBatchDTO]:
         """Mark the current batch as COMPLETED, persist to storage, and notify callbacks."""
-        batch = self._current_batch
-        if batch is None:
-            raise RuntimeError("Cannot complete batch: no active batch present.")
+        callback = None
+        with self._lock:
+            batch = self._current_batch
+            if batch is None:
+                return None
 
-        batch.finish_time = finish_utc
-        batch.status = "COMPLETED"
+            self._current_batch = None
+            batch.finish_time = finish_utc
+            batch.status = "COMPLETED"
 
-        if self.storage:
+            if self.storage:
+                try:
+                    self.storage.finish_batch(batch.batch_id, finish_utc, batch.total_count)
+                except Exception as e:
+                    logger.error("Failed to persist batch finish: %s", e)
+
+            callback = self.on_batch_finish
+
+        if callback:
             try:
-                self.storage.finish_batch(batch.batch_id, finish_utc, batch.total_count)
-            except Exception as e:
-                logger.error("Failed to persist batch finish: %s", e)
-
-        if self.on_batch_finish:
-            try:
-                self.on_batch_finish(batch)
+                callback(batch)
             except Exception as e:
                 logger.error("Error in on_batch_finish callback: %s", e)
 
@@ -221,5 +226,4 @@ class BatchManager:
             batch.total_count,
             runtime_str,
         )
-        self._current_batch = None
         return batch

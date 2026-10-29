@@ -242,3 +242,89 @@ def test_chicken_counter_reset_count():
 
     assert counter.total_count == 0
     assert len(counter.counted_track_ids) == 0
+
+
+def test_batch_manager_state_in_on_batch_finish_callback(storage):
+    callback_state = {}
+
+    def on_finish(batch):
+        callback_state["is_active"] = manager.is_active
+        callback_state["current_batch"] = manager.current_batch
+        callback_state["current_batch_id"] = manager.current_batch_id
+        callback_state["batch_id"] = batch.batch_id
+        callback_state["status"] = batch.status
+
+    manager = BatchManager(
+        line_id="line-1",
+        storage=storage,
+        idle_timeout_sec=2.0,
+        on_batch_finish=on_finish,
+    )
+
+    t0 = 100.0
+    manager.on_activity(count_increment=5, now_perf=t0)
+    assert manager.is_active
+
+    completed = manager.check_idle_timeout(now_perf=t0 + 2.5)
+    assert completed is not None
+    assert callback_state["is_active"] is False
+    assert callback_state["current_batch"] is None
+    assert callback_state["current_batch_id"] is None
+    assert callback_state["batch_id"] == completed.batch_id
+    assert callback_state["status"] == "COMPLETED"
+
+
+def test_batch_manager_concurrent_activity_thread_safety(storage):
+    import concurrent.futures
+
+    start_calls = []
+    manager = BatchManager(
+        line_id="line-threads",
+        storage=storage,
+        idle_timeout_sec=60.0,
+        on_batch_start=lambda b_id: start_calls.append(b_id),
+    )
+
+    num_threads = 10
+    increments_per_thread = 50
+    total_expected = num_threads * increments_per_thread
+
+    def worker():
+        for _ in range(increments_per_thread):
+            manager.on_activity(count_increment=1)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(worker) for _ in range(num_threads)]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()
+
+    assert manager.is_active
+    assert manager.current_batch is not None
+    assert manager.current_batch.total_count == total_expected
+    assert len(start_calls) == 1
+
+    active_in_store = storage.get_active_batch("line-threads")
+    assert active_in_store is not None
+    assert active_in_store.total_count == total_expected
+
+
+def test_batch_manager_prefix_normalization(storage):
+    manager = BatchManager(
+        line_id="line-prefix",
+        storage=storage,
+        batch_prefix="shift_b_",
+    )
+    now_utc = datetime(2026, 10, 29, 14, 0, 0, tzinfo=timezone.utc)
+    batch = manager.on_activity(count_increment=1, now_utc=now_utc)
+    assert batch.batch_id.startswith("shift_b_line-prefix_20261029_140000")
+    assert not batch.batch_id.startswith("shift_b__")
+
+
+def test_batch_manager_negative_count_increment_ignored(storage):
+    manager = BatchManager(line_id="line-defensive", storage=storage)
+    batch = manager.on_activity(count_increment=-10)
+    assert batch.total_count == 0
+    manager.on_activity(count_increment=5)
+    assert batch.total_count == 5
+    manager.on_activity(count_increment=-3)
+    assert batch.total_count == 5
