@@ -9,7 +9,7 @@ except ImportError:
 
 
 class OutboxSyncDispatcher:
-    """Dispatches unsynced events, aggregates, and health metrics to cloud API."""
+    """Dispatches unsynced events, aggregates, health metrics, and batches to cloud API."""
 
     def __init__(
         self,
@@ -39,7 +39,7 @@ class OutboxSyncDispatcher:
         Attempt to sync a single batch of unsynced items from outbox storage.
 
         Returns:
-            The total number of synced records (events + aggregates + health) on success,
+            The total number of synced records (events + aggregates + health + batches) on success,
             or 0 if outbox was empty or dispatch failed.
         """
         payload, item_ids = self.storage.get_unsynced_batch(
@@ -51,8 +51,9 @@ class OutboxSyncDispatcher:
         event_ids = item_ids.get("event_ids", [])
         aggregate_ids = item_ids.get("aggregate_ids", [])
         health_ids = item_ids.get("health_ids", [])
+        batch_ids = item_ids.get("batch_ids", [])
 
-        total_items = len(event_ids) + len(aggregate_ids) + len(health_ids)
+        total_items = len(event_ids) + len(aggregate_ids) + len(health_ids) + len(batch_ids)
         if total_items == 0:
             return 0
 
@@ -82,6 +83,8 @@ class OutboxSyncDispatcher:
                     self.storage.mark_aggregates_synced(aggregate_ids)
                 if health_ids:
                     self.storage.mark_health_synced(health_ids)
+                if batch_ids:
+                    self.storage.mark_batches_synced(batch_ids)
                 self.backoff_sec = 1.0
                 return total_items
             else:

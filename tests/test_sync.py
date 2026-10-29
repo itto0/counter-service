@@ -5,6 +5,7 @@ import httpx
 from shared.contracts import (
     CountAggregateDTO,
     CountEventDTO,
+    CountingBatchDTO,
     HealthSampleDTO,
 )
 from src.storage.db import LocalStorage
@@ -315,4 +316,40 @@ def test_sync_dispatcher_sends_authorization_header_when_api_token_set(tmp_path)
     mock_http_client.post.assert_called_once()
     _, kwargs = mock_http_client.post.call_args
     assert kwargs.get("headers") == {"Authorization": "Bearer cdc_live_test_token_123"}
+
+
+def test_sync_dispatcher_pushes_completed_batches_and_marks_synced(tmp_path):
+    storage = LocalStorage(db_path=str(tmp_path / "sync_batch.db"))
+    storage.init_db()
+
+    now = datetime.now(timezone.utc)
+    batch = CountingBatchDTO(
+        batch_id="line-1_20261029_090000",
+        line_id="line-1",
+        start_time=now,
+        finish_time=now,
+        total_count=50,
+        status="COMPLETED",
+    )
+    storage.start_batch(batch)
+    storage.finish_batch("line-1_20261029_090000", finish_time=now, total_count=50)
+
+    mock_http_client = MagicMock()
+    mock_http_client.post.return_value.status_code = 200
+
+    dispatcher = OutboxSyncDispatcher(
+        storage=storage,
+        api_url="http://mock-api/api/v1/sync/batch",
+        line_id="line-1",
+        http_client=mock_http_client,
+    )
+
+    synced_count = dispatcher.sync_once()
+    assert synced_count >= 1
+    assert len(storage.get_unsynced_batches(line_id="line-1")) == 0
+    mock_http_client.post.assert_called_once()
+    sent_payload = mock_http_client.post.call_args[1]["json"]
+    assert len(sent_payload.get("batches", [])) == 1
+    assert sent_payload["batches"][0]["batch_id"] == "line-1_20261029_090000"
+
 
