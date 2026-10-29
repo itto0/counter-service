@@ -2,9 +2,9 @@
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from main import CounterService, build_cli_parser
+from main import CounterService, build_cli_parser, main
 from src.storage.db import LocalStorage
 
 
@@ -28,6 +28,7 @@ def test_telemetry_defaults_to_model_accuracy(tmp_path):
     assert len(samples) == 1
     # By default, must record model_accuracy_pct (95.5) NOT dynamic (60.0)
     assert samples[0]["accuracy_pct"] == 95.5
+    service.counter.get_tracking_accuracy_pct.assert_not_called()
 
 
 def test_telemetry_opt_in_dynamic_accuracy(tmp_path):
@@ -122,11 +123,36 @@ def test_cli_parser_use_dynamic_accuracy(monkeypatch):
     args_flag = parser.parse_args(["--use-dynamic-accuracy"])
     assert args_flag.use_dynamic_accuracy is True
 
-    # Env var default when not specified
-    monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "1")
+    # Env var default when not specified (test stripping whitespace)
+    monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "  1  \n")
     parser_env = build_cli_parser()
     args_env = parser_env.parse_args([])
     assert args_env.use_dynamic_accuracy is True
+
+
+def test_main_forwards_use_dynamic_accuracy(monkeypatch):
+    """Verify main() forwards args.use_dynamic_accuracy into CounterService."""
+    monkeypatch.delenv("USE_DYNAMIC_ACCURACY", raising=False)
+
+    with patch("main.CounterService") as mock_service_cls:
+        instance = mock_service_cls.return_value
+        instance.run.return_value = 0
+
+        # Case 1: Default (not enabled)
+        main(["--no-sync", "--max-frames", "1"])
+        call_kwargs = mock_service_cls.call_args.kwargs
+        assert call_kwargs.get("use_dynamic_accuracy") is False
+
+        # Case 2: CLI flag enabled
+        main(["--use-dynamic-accuracy", "--no-sync", "--max-frames", "1"])
+        call_kwargs = mock_service_cls.call_args.kwargs
+        assert call_kwargs.get("use_dynamic_accuracy") is True
+
+        # Case 3: Env var enabled (with whitespace stripping)
+        monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "  true  ")
+        main(["--no-sync", "--max-frames", "1"])
+        call_kwargs = mock_service_cls.call_args.kwargs
+        assert call_kwargs.get("use_dynamic_accuracy") is True
 
 
 

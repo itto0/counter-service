@@ -1437,7 +1437,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--use-dynamic-accuracy",
         action="store_true",
-        default=os.getenv("USE_DYNAMIC_ACCURACY", "").lower() in ("1", "true", "yes"),
+        default=os.getenv("USE_DYNAMIC_ACCURACY", "").strip().lower() in ("1", "true", "yes"),
         help="Enable dynamic operational tracking accuracy calculation in health telemetry (default: False)",
     )
 
