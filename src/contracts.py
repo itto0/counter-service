@@ -12,6 +12,16 @@ class CountEventDTO(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     line_id: str = "line-1"
     class_name: str = "chicken"
+    batch_id: str | None = None
+
+
+class CountingBatchDTO(BaseModel):
+    batch_id: str
+    line_id: str = "line-1"
+    start_time: datetime
+    finish_time: datetime | None = None
+    total_count: int = Field(default=0, ge=0)
+    status: Literal["ACTIVE", "COMPLETED"] = "ACTIVE"
 
 
 class CountAggregateDTO(BaseModel):
@@ -39,6 +49,7 @@ class SyncBatchPayload(BaseModel):
     events: list[CountEventDTO] = Field(default_factory=list)
     aggregates: list[CountAggregateDTO] = Field(default_factory=list)
     health: HealthSampleDTO | None = None
+    batches: list[CountingBatchDTO] = Field(default_factory=list)
 
 
 class PipelineConfig(BaseModel):
@@ -50,10 +61,13 @@ class PipelineConfig(BaseModel):
     onnx_providers: str = Field(default="auto", description="auto or comma-separated list of providers")
     tracker_track_thresh: float = Field(default=0.4, description="High-confidence detection threshold for tracker")
     tracker_match_thresh: float = Field(default=0.7, description="IoU matching threshold for tracker")
+    batch_idle_timeout_sec: float = Field(default=30.0, description="Idle timeout in seconds to finish counting batch")
+    batch_prefix: str | None = Field(default=None, description="Optional custom prefix for batch IDs")
 
 
 __all__ = [
     "CountEventDTO",
+    "CountingBatchDTO",
     "CountAggregateDTO",
     "HealthSampleDTO",
     "SyncBatchPayload",
