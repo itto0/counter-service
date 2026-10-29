@@ -53,6 +53,7 @@ try:
     )
     from src.storage.db import LocalStorage
     from src.sync.dispatcher import OutboxSyncDispatcher
+    from src.tracking.batch import BatchManager
     from src.tracking.tracker import ChickenCounter, VirtualLineZone
 except ImportError:
     from src.capture.source import (
@@ -70,6 +71,7 @@ except ImportError:
     )
     from src.storage.db import LocalStorage
     from src.sync.dispatcher import OutboxSyncDispatcher
+    from src.tracking.batch import BatchManager
     from src.tracking.tracker import ChickenCounter, VirtualLineZone
 
 try:
@@ -205,6 +207,9 @@ class CounterService:
         match_thresh: float = 0.7,
         accuracy_ema_alpha: Optional[float] = None,
         use_dynamic_accuracy: Optional[bool] = None,
+        batch_manager: Optional[Any] = None,
+        batch_idle_timeout_sec: Optional[float] = None,
+        batch_prefix: Optional[str] = None,
     ) -> None:
         self.line_id = line_id
         self.video_source_type = video_source_type.lower()
@@ -233,6 +238,22 @@ class CounterService:
         self.is_idle = False
         self._last_detection_time = time.perf_counter()
 
+        if batch_idle_timeout_sec is not None:
+            self.batch_idle_timeout_sec = float(batch_idle_timeout_sec)
+        elif pipeline_config is not None and getattr(pipeline_config, "batch_idle_timeout_sec", None) is not None:
+            self.batch_idle_timeout_sec = float(pipeline_config.batch_idle_timeout_sec)
+        elif self.idle_timeout_sec is not None and self.idle_timeout_sec > 0:
+            self.batch_idle_timeout_sec = float(self.idle_timeout_sec)
+        else:
+            self.batch_idle_timeout_sec = 30.0
+
+        if batch_prefix is not None:
+            self.batch_prefix = batch_prefix
+        elif pipeline_config is not None and getattr(pipeline_config, "batch_prefix", None) is not None:
+            self.batch_prefix = pipeline_config.batch_prefix
+        else:
+            self.batch_prefix = os.getenv("BATCH_PREFIX")
+
         if pipeline_config is not None:
             self.capture_mode = getattr(pipeline_config, "capture_mode", capture_mode)
             self.pace_files = getattr(pipeline_config, "capture_pace_files", pace_files)
@@ -256,6 +277,8 @@ class CounterService:
                     onnx_providers=self.onnx_providers,
                     tracker_track_thresh=self.track_thresh,
                     tracker_match_thresh=self.match_thresh,
+                    batch_idle_timeout_sec=self.batch_idle_timeout_sec,
+                    batch_prefix=self.batch_prefix,
                 )
             else:
                 self.pipeline_config = None
@@ -409,6 +432,26 @@ class CounterService:
                 track_thresh=self.track_thresh,
                 match_thresh=self.match_thresh,
             )
+
+        # Batch manager
+        if batch_manager is not None:
+            self.batch_manager = batch_manager
+            if getattr(self.batch_manager, "on_batch_start", None) is None:
+                self.batch_manager.on_batch_start = self._on_batch_start
+        else:
+            self.batch_manager = BatchManager(
+                line_id=self.line_id,
+                storage=self.storage,
+                idle_timeout_sec=self.batch_idle_timeout_sec,
+                batch_prefix=self.batch_prefix,
+                on_batch_start=self._on_batch_start,
+            )
+
+    def _on_batch_start(self, batch_id: str) -> None:
+        """Callback invoked when BatchManager transitions into a new active counting batch."""
+        logger.info("New batch started: %s. Resetting counter to 0.", batch_id)
+        if hasattr(self, "counter") and hasattr(self.counter, "reset_count"):
+            self.counter.reset_count()
 
     def trigger_sync(self) -> None:
         """Signal the background sync thread to wake and flush outbox immediately."""
@@ -589,6 +632,11 @@ class CounterService:
         self.running = False
         self._stop_event.set()
         self._sync_trigger.set()
+        if hasattr(self, "batch_manager") and self.batch_manager:
+            try:
+                self.batch_manager.force_finish()
+            except Exception as e:
+                logger.warning("Error finishing active batch on stop: %s", e)
         if self.stream_uploader is not None:
             try:
                 self.stream_uploader.stop()
@@ -721,6 +769,8 @@ class CounterService:
                 now_det = time.perf_counter()
                 if len(detections) > 0:
                     self._last_detection_time = now_det
+                    if hasattr(self, "batch_manager") and self.batch_manager and not self.batch_manager.is_active:
+                        self.batch_manager.on_activity(count_increment=0, now_perf=now_det)
                     if self.is_idle:
                         self.is_idle = False
                         logger.info("Object detected: exiting idle mode, resuming full processing")
@@ -755,8 +805,14 @@ class CounterService:
                 self._health_latencies_ms.append(latency_ms)
                 self._all_latencies_ms.append(latency_ms)
 
+                if len(detections) > 0 or len(events) > 0:
+                    if hasattr(self, "batch_manager") and self.batch_manager:
+                        self.batch_manager.on_activity(count_increment=len(events), now_perf=now_det)
+
                 # 3. LocalStorage Outbox (non-blocking)
                 for ev in events:
+                    if hasattr(self, "batch_manager") and self.batch_manager:
+                        ev.batch_id = self.batch_manager.current_batch_id
                     self.storage.insert_event(self.line_id, ev)
                     self._window_count += 1
                     self._window_confidences.append(ev.confidence)
@@ -770,9 +826,10 @@ class CounterService:
                             f"Line Total: {self.counter.total_count}"
                         )
                     logger.debug(
-                        "Saved count event: track_id=%d, line=%s",
+                        "Saved count event: track_id=%d, line=%s, batch_id=%s",
                         ev.track_id,
                         self.line_id,
+                        getattr(ev, "batch_id", None),
                     )
 
                 if events:
@@ -814,8 +871,13 @@ class CounterService:
                     except Exception:
                         pass
 
-                # 4. Periodic Aggregates calculation
+                # 4. Periodic Aggregates calculation & Batch Idle Timeout Check
                 now = time.perf_counter()
+                if hasattr(self, "batch_manager") and self.batch_manager:
+                    completed_batch = self.batch_manager.check_idle_timeout(now_perf=now)
+                    if completed_batch is not None:
+                        self.trigger_sync()
+
                 if now - self._window_last_calc_time >= self.aggregate_window_sec:
                     self._record_aggregate(now)
 
@@ -831,8 +893,14 @@ class CounterService:
                     curr_rate = self.counter.total_count * (60.0 / elapsed_total)
                     recent_lat = self._all_latencies_ms[-1] if self._all_latencies_ms else 0.0
                     idle_tag = " [IDLE]" if self.is_idle else ""
+                    b_id = (
+                        self.batch_manager.current_batch_id
+                        if hasattr(self, "batch_manager") and self.batch_manager and self.batch_manager.current_batch_id
+                        else "IDLE"
+                    )
                     sys.stdout.write(
                         f"\r[Frame {self.total_frames_processed:5d}{idle_tag}] "
+                        f"Batch: {b_id} | "
                         f"Chickens: {self.counter.total_count:4d} | "
                         f"Rate: {curr_rate:5.1f}/min | "
                         f"Speed: {curr_fps:5.1f} fps | "
@@ -968,14 +1036,25 @@ class CounterService:
             fps = self.total_frames_processed / elapsed
             rate = self.counter.total_count * (60.0 / elapsed)
 
+            b_id = (
+                self.batch_manager.current_batch_id
+                if hasattr(self, "batch_manager") and self.batch_manager and self.batch_manager.current_batch_id
+                else "IDLE"
+            )
             hud_text = (
+                f"Batch: {b_id} | "
                 f"Frames: {self.total_frames_processed} | "
                 f"Count: {self.counter.total_count} | "
                 f"Rate: {rate:.1f}/min | "
                 f"FPS: {fps:.1f}"
             )
-            cv2.rectangle(vis, (10, 10), (min(w - 10, 560), 45), (0, 0, 0), -1)
-            cv2.putText(vis, hud_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            try:
+                (text_w, _), _ = cv2.getTextSize(hud_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                hud_box_width = min(w - 10, 20 + text_w + 10)
+            except Exception:
+                hud_box_width = min(w - 10, 780)
+            cv2.rectangle(vis, (10, 10), (hud_box_width, 45), (0, 0, 0), -1)
+            cv2.putText(vis, hud_text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
             return vis
         except Exception as e:
@@ -1064,6 +1143,10 @@ class CounterService:
         print(f"  Virtual Line:    ({start_pt[0]:.1f}, {start_pt[1]:.1f}) -> ({end_pt[0]:.1f}, {end_pt[1]:.1f}) [{direction}]")
         print(f"  API Sync:        {sync_desc}")
         print(f"  Stream Relay:    {stream_desc}")
+        batch_info = f"{self.batch_idle_timeout_sec:.1f}s idle timeout"
+        if self.batch_prefix:
+            batch_info += f" (prefix: '{self.batch_prefix}')"
+        print(f"  Batch Mode:      {batch_info}")
         print(f"  Outbox Database: {self.db_path}")
         print("=" * 74)
         print("Processing video stream... Press Ctrl+C to stop.\n")
@@ -1102,6 +1185,12 @@ class CounterService:
         print(f"  Avg / p95 Inference Latency:{lat_avg:.2f} ms / {lat_p95:.2f} ms")
         print(f"  Estimated Conveyor Rate:    {rate_per_min:.1f} chickens/min")
         print(f"  Conveyor Line Status:       {status}")
+        curr_batch_id = (
+            self.batch_manager.current_batch_id
+            if hasattr(self, "batch_manager") and self.batch_manager and self.batch_manager.current_batch_id
+            else "None (idle/closed)"
+        )
+        print(f"  Active Batch ID:            {curr_batch_id}")
         print(f"  Local Database:             {self.db_path}")
         print("=" * 74 + "\n")
         sys.stdout.flush()
@@ -1113,6 +1202,13 @@ class CounterService:
         self.running = False
         self._stop_event.set()
         self._sync_trigger.set()
+
+        # Finalize any active batch
+        if hasattr(self, "batch_manager") and self.batch_manager:
+            try:
+                self.batch_manager.force_finish()
+            except Exception as e:
+                logger.warning("Error finishing active batch during cleanup: %s", e)
 
         if self.stream_uploader is not None:
             try:
@@ -1442,6 +1538,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--batch-idle-timeout",
+        "--batch-idle-timeout-sec",
+        dest="batch_idle_timeout_sec",
+        type=float,
+        default=float(os.getenv("BATCH_IDLE_TIMEOUT_SEC") or "30.0"),
+        help="Inactivity timeout in seconds to automatically complete a counting batch (default: 30.0)",
+    )
+    parser.add_argument(
+        "--batch-prefix",
+        default=os.getenv("BATCH_PREFIX") or None,
+        help="Optional prefix prepended to batch IDs (e.g. 'morning_shift')",
+    )
+
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=os.getenv("VERBOSE", "").lower() in ("1", "true", "yes"),
@@ -1668,6 +1778,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         track_thresh=args.track_thresh,
         match_thresh=args.match_thresh,
         use_dynamic_accuracy=args.use_dynamic_accuracy,
+        batch_idle_timeout_sec=args.batch_idle_timeout_sec,
+        batch_prefix=args.batch_prefix,
     )
 
     def handle_shutdown(signum: int, frame: object) -> None:
