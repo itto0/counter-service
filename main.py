@@ -204,6 +204,7 @@ class CounterService:
         track_thresh: float = 0.4,
         match_thresh: float = 0.7,
         accuracy_ema_alpha: Optional[float] = None,
+        use_dynamic_accuracy: Optional[bool] = None,
     ) -> None:
         self.line_id = line_id
         self.video_source_type = video_source_type.lower()
@@ -304,6 +305,14 @@ class CounterService:
         except (ValueError, TypeError):
             parsed_alpha = 0.15
         self.accuracy_ema_alpha: float = min(1.0, max(0.01, parsed_alpha))
+
+        if use_dynamic_accuracy is None and pipeline_config is not None:
+            use_dynamic_accuracy = getattr(pipeline_config, "use_dynamic_accuracy", None)
+        if use_dynamic_accuracy is None:
+            env_dynamic = os.getenv("USE_DYNAMIC_ACCURACY", "").strip().lower()
+            self.use_dynamic_accuracy: bool = env_dynamic in ("true", "1", "yes")
+        else:
+            self.use_dynamic_accuracy = bool(use_dynamic_accuracy)
 
         # Storage
         self.storage = storage or LocalStorage(db_path=self.db_path)
@@ -510,39 +519,42 @@ class CounterService:
         elif stream_state == "ONLINE" and fps < 5.0 and self.total_frames_processed > 0:
             stream_state = "DEGRADED"
 
-        dynamic_acc = (
-            self.counter.get_tracking_accuracy_pct(reset_window=True)
-            if hasattr(self, "counter") and hasattr(self.counter, "get_tracking_accuracy_pct")
-            else None
-        )
-        if dynamic_acc is not None:
-            if self._smoothed_accuracy_pct is None:
-                self._smoothed_accuracy_pct = round(min(100.0, max(0.0, dynamic_acc)), 2)
-            else:
-                alpha = self.accuracy_ema_alpha
-                blended = (alpha * dynamic_acc) + ((1.0 - alpha) * self._smoothed_accuracy_pct)
-                self._smoothed_accuracy_pct = round(min(100.0, max(0.0, blended)), 2)
-            self._last_active_accuracy_pct = self._smoothed_accuracy_pct
-            current_acc = self._smoothed_accuracy_pct
+        if not self.use_dynamic_accuracy:
+            current_acc = self.model_accuracy_pct
         else:
-            # Conveyor idle: fall back to smoothed score, last active reading, or static model accuracy
-            current_acc = (
-                self._smoothed_accuracy_pct
-                if self._smoothed_accuracy_pct is not None
-                else (
-                    self._last_active_accuracy_pct
-                    if self._last_active_accuracy_pct is not None
-                    else self.model_accuracy_pct
+            dynamic_acc = (
+                self.counter.get_tracking_accuracy_pct(reset_window=True)
+                if hasattr(self, "counter") and hasattr(self.counter, "get_tracking_accuracy_pct")
+                else None
+            )
+            if dynamic_acc is not None:
+                if self._smoothed_accuracy_pct is None:
+                    self._smoothed_accuracy_pct = round(min(100.0, max(0.0, dynamic_acc)), 2)
+                else:
+                    alpha = self.accuracy_ema_alpha
+                    blended = (alpha * dynamic_acc) + ((1.0 - alpha) * self._smoothed_accuracy_pct)
+                    self._smoothed_accuracy_pct = round(min(100.0, max(0.0, blended)), 2)
+                self._last_active_accuracy_pct = self._smoothed_accuracy_pct
+                current_acc = self._smoothed_accuracy_pct
+            else:
+                # Conveyor idle: fall back to smoothed score, last active reading, or static model accuracy
+                current_acc = (
+                    self._smoothed_accuracy_pct
+                    if self._smoothed_accuracy_pct is not None
+                    else (
+                        self._last_active_accuracy_pct
+                        if self._last_active_accuracy_pct is not None
+                        else self.model_accuracy_pct
+                    )
                 )
-            )
 
-        if stream_state != "IDLE" and current_acc is not None and current_acc < 80.0:
-            logger.warning(
-                "Operational tracking accuracy degraded: %.1f%% (FPS=%.1f, latency_p95=%.1fms)",
-                current_acc,
-                fps,
-                latency_p95,
-            )
+            if stream_state != "IDLE" and current_acc is not None and current_acc < 80.0:
+                logger.warning(
+                    "Operational tracking accuracy degraded: %.1f%% (FPS=%.1f, latency_p95=%.1fms)",
+                    current_acc,
+                    fps,
+                    latency_p95,
+                )
 
         health = HealthSampleDTO(
             fps=round(fps, 1),
@@ -1422,6 +1434,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=float(os.getenv("HEALTH_INTERVAL_SEC") or "10.0"),
         help="Health telemetry recording interval in seconds (default: 10.0)",
     )
+    parser.add_argument(
+        "--use-dynamic-accuracy",
+        action="store_true",
+        default=os.getenv("USE_DYNAMIC_ACCURACY", "").lower() in ("1", "true", "yes"),
+        help="Enable dynamic operational tracking accuracy calculation in health telemetry (default: False)",
+    )
 
     parser.add_argument(
         "--verbose",
@@ -1649,6 +1667,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         duration_sec=args.duration,
         track_thresh=args.track_thresh,
         match_thresh=args.match_thresh,
+        use_dynamic_accuracy=args.use_dynamic_accuracy,
     )
 
     def handle_shutdown(signum: int, frame: object) -> None:

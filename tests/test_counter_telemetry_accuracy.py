@@ -1,10 +1,133 @@
 """Tests for dynamic telemetry tracking accuracy integration and degraded stream alerting."""
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from main import CounterService
+from main import CounterService, build_cli_parser
 from src.storage.db import LocalStorage
+
+
+def test_telemetry_defaults_to_model_accuracy(tmp_path):
+    """Verify CounterService defaults to recording model_accuracy_pct in telemetry."""
+    db_file = str(tmp_path / "test_default_model.db")
+    storage = LocalStorage(db_path=db_file)
+
+    service = CounterService(
+        line_id="lineDefaultModel",
+        storage=storage,
+        enable_sync=False,
+    )
+    assert service.use_dynamic_accuracy is False
+    service.model_accuracy_pct = 95.5
+    service.counter.get_tracking_accuracy_pct = MagicMock(return_value=60.0)
+
+    service._record_health()
+
+    samples = storage.get_unsynced_health(line_id="lineDefaultModel")
+    assert len(samples) == 1
+    # By default, must record model_accuracy_pct (95.5) NOT dynamic (60.0)
+    assert samples[0]["accuracy_pct"] == 95.5
+
+
+def test_telemetry_opt_in_dynamic_accuracy(tmp_path):
+    """Verify CounterService records dynamic tracking accuracy when use_dynamic_accuracy=True."""
+    db_file = str(tmp_path / "test_opt_in.db")
+    storage = LocalStorage(db_path=db_file)
+
+    service = CounterService(
+        line_id="lineOptIn",
+        storage=storage,
+        enable_sync=False,
+        use_dynamic_accuracy=True,
+    )
+    assert service.use_dynamic_accuracy is True
+    service.model_accuracy_pct = 95.5
+    service.counter.get_tracking_accuracy_pct = MagicMock(return_value=75.0)
+
+    service._record_health()
+
+    samples = storage.get_unsynced_health(line_id="lineOptIn")
+    assert len(samples) == 1
+    assert samples[0]["accuracy_pct"] == 75.0
+
+
+def test_telemetry_dynamic_accuracy_precedence(tmp_path, monkeypatch):
+    """Verify precedence: constructor arg > pipeline_config > env var > default False."""
+    db_file = str(tmp_path / "test_precedence.db")
+    storage = LocalStorage(db_path=db_file)
+
+    # 1. Default is False
+    monkeypatch.delenv("USE_DYNAMIC_ACCURACY", raising=False)
+    s1 = CounterService(line_id="l1", storage=storage, enable_sync=False)
+    assert s1.use_dynamic_accuracy is False
+
+    # 2. Env var true
+    monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "true")
+    s2 = CounterService(line_id="l2", storage=storage, enable_sync=False)
+    assert s2.use_dynamic_accuracy is True
+
+    # 3. pipeline_config overrides env var
+    cfg_false = SimpleNamespace(use_dynamic_accuracy=False)
+    s3 = CounterService(line_id="l3", storage=storage, enable_sync=False, pipeline_config=cfg_false)
+    assert s3.use_dynamic_accuracy is False
+
+    cfg_true = SimpleNamespace(use_dynamic_accuracy=True)
+    monkeypatch.delenv("USE_DYNAMIC_ACCURACY", raising=False)
+    s4 = CounterService(line_id="l4", storage=storage, enable_sync=False, pipeline_config=cfg_true)
+    assert s4.use_dynamic_accuracy is True
+
+    # 4. Constructor arg overrides pipeline_config and env var
+    monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "true")
+    s5 = CounterService(
+        line_id="l5",
+        storage=storage,
+        enable_sync=False,
+        pipeline_config=cfg_true,
+        use_dynamic_accuracy=False,
+    )
+    assert s5.use_dynamic_accuracy is False
+
+
+def test_degraded_warning_suppressed_when_dynamic_accuracy_disabled(tmp_path, caplog):
+    """Verify degraded tracking accuracy warning is suppressed when use_dynamic_accuracy=False."""
+    db_file = str(tmp_path / "test_suppress.db")
+    storage = LocalStorage(db_path=db_file)
+
+    service = CounterService(
+        line_id="lineSuppress",
+        storage=storage,
+        enable_sync=False,
+        use_dynamic_accuracy=False,
+    )
+    service.model_accuracy_pct = 90.0
+    service.counter.get_tracking_accuracy_pct = MagicMock(return_value=50.0)
+
+    with caplog.at_level(logging.WARNING, logger="counter.service"):
+        service._record_health()
+
+    assert "Operational tracking accuracy degraded" not in caplog.text
+
+
+def test_cli_parser_use_dynamic_accuracy(monkeypatch):
+    """Verify --use-dynamic-accuracy flag in CLI parser."""
+    monkeypatch.delenv("USE_DYNAMIC_ACCURACY", raising=False)
+    parser = build_cli_parser()
+
+    # Default is False
+    args_default = parser.parse_args([])
+    assert args_default.use_dynamic_accuracy is False
+
+    # Flag passed
+    args_flag = parser.parse_args(["--use-dynamic-accuracy"])
+    assert args_flag.use_dynamic_accuracy is True
+
+    # Env var default when not specified
+    monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "1")
+    parser_env = build_cli_parser()
+    args_env = parser_env.parse_args([])
+    assert args_env.use_dynamic_accuracy is True
+
 
 
 def test_record_health_uses_dynamic_tracking_accuracy(tmp_path):
@@ -16,6 +139,7 @@ def test_record_health_uses_dynamic_tracking_accuracy(tmp_path):
         line_id="lineDynamicAcc",
         storage=storage,
         enable_sync=False,
+        use_dynamic_accuracy=True,
     )
 
     assert hasattr(service, "_last_active_accuracy_pct")
@@ -42,6 +166,7 @@ def test_record_health_idle_fallback(tmp_path):
         line_id="lineFallback",
         storage=storage,
         enable_sync=False,
+        use_dynamic_accuracy=True,
     )
     service.model_accuracy_pct = 92.0
 
@@ -83,6 +208,7 @@ def test_record_health_degraded_warning_log(tmp_path, caplog):
         line_id="lineDegraded",
         storage=storage,
         enable_sync=False,
+        use_dynamic_accuracy=True,
     )
 
     # Sub-80% accuracy triggers warning
@@ -98,6 +224,7 @@ def test_record_health_degraded_warning_log(tmp_path, caplog):
         line_id="lineHealthy",
         storage=storage,
         enable_sync=False,
+        use_dynamic_accuracy=True,
     )
     service_healthy.counter.get_tracking_accuracy_pct = MagicMock(return_value=85.0)
     with caplog.at_level(logging.WARNING, logger="counter.service"):
@@ -114,6 +241,7 @@ def test_smoothed_accuracy_seeded_on_first_active_window(tmp_path):
         line_id="lineSeed",
         storage=storage,
         enable_sync=False,
+        use_dynamic_accuracy=True,
     )
 
     assert hasattr(service, "_smoothed_accuracy_pct")
@@ -140,6 +268,7 @@ def test_smoothed_accuracy_ema_gradual_decay_and_recovery(tmp_path):
         storage=storage,
         enable_sync=False,
         accuracy_ema_alpha=0.15,
+        use_dynamic_accuracy=True,
     )
 
     # Window 1: Seed with 90.0%
@@ -179,6 +308,7 @@ def test_smoothed_accuracy_idle_preserves_score(tmp_path):
         storage=storage,
         enable_sync=False,
         accuracy_ema_alpha=0.15,
+        use_dynamic_accuracy=True,
     )
 
     # Window 1: Active window seeds smoothed accuracy
@@ -241,6 +371,7 @@ def test_smoothed_accuracy_clamping(tmp_path):
         storage=storage,
         enable_sync=False,
         accuracy_ema_alpha=0.5,
+        use_dynamic_accuracy=True,
     )
 
     # Seed at 90.0
@@ -275,6 +406,7 @@ def test_record_health_degraded_warning_suppressed_when_idle(tmp_path, caplog):
         line_id="lineIdleDegraded",
         storage=storage,
         enable_sync=False,
+        use_dynamic_accuracy=True,
     )
 
     # Low accuracy (< 80%) on active counter window
@@ -307,6 +439,7 @@ def test_record_health_degraded_warning_suppressed_when_idle(tmp_path, caplog):
         line_id="lineArgIdle",
         storage=storage,
         enable_sync=False,
+        use_dynamic_accuracy=True,
     )
     service_arg_idle.counter.get_tracking_accuracy_pct = MagicMock(return_value=65.0)
     caplog.clear()
@@ -356,19 +489,19 @@ def test_smoothed_accuracy_seed_clamping(tmp_path):
     storage = LocalStorage(db_path=db_file)
 
     # Initial seed > 100.0 is clamped to 100.0
-    service_high = CounterService(line_id="lineHighSeed", storage=storage, enable_sync=False)
+    service_high = CounterService(line_id="lineHighSeed", storage=storage, enable_sync=False, use_dynamic_accuracy=True)
     service_high.counter.get_tracking_accuracy_pct = MagicMock(return_value=125.456)
     service_high._record_health()
     assert service_high._smoothed_accuracy_pct == 100.0
 
     # Initial seed < 0.0 is clamped to 0.0
-    service_low = CounterService(line_id="lineLowSeed", storage=storage, enable_sync=False)
+    service_low = CounterService(line_id="lineLowSeed", storage=storage, enable_sync=False, use_dynamic_accuracy=True)
     service_low.counter.get_tracking_accuracy_pct = MagicMock(return_value=-15.8)
     service_low._record_health()
     assert service_low._smoothed_accuracy_pct == 0.0
 
     # Initial seed rounding to 2 decimal places
-    service_round = CounterService(line_id="lineRoundSeed", storage=storage, enable_sync=False)
+    service_round = CounterService(line_id="lineRoundSeed", storage=storage, enable_sync=False, use_dynamic_accuracy=True)
     service_round.counter.get_tracking_accuracy_pct = MagicMock(return_value=85.6789)
     service_round._record_health()
     assert service_round._smoothed_accuracy_pct == 85.68
