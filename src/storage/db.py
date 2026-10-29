@@ -9,6 +9,7 @@ try:
     from src.contracts import (
         CountAggregateDTO,
         CountEventDTO,
+        CountingBatchDTO,
         HealthSampleDTO,
         SyncBatchPayload,
     )
@@ -17,6 +18,7 @@ except ImportError:
         from src.contracts import (
             CountAggregateDTO,
             CountEventDTO,
+            CountingBatchDTO,
             HealthSampleDTO,
             SyncBatchPayload,
         )
@@ -24,6 +26,7 @@ except ImportError:
         from shared.contracts import (
             CountAggregateDTO,
             CountEventDTO,
+            CountingBatchDTO,
             HealthSampleDTO,
             SyncBatchPayload,
         )
@@ -59,6 +62,18 @@ class LocalStorage:
                         track_id INTEGER NOT NULL,
                         ts_utc TEXT NOT NULL,
                         confidence REAL NOT NULL,
+                        batch_id TEXT NULL,
+                        synced_at TEXT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS outbox_batches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        batch_id TEXT NOT NULL UNIQUE,
+                        line_id TEXT NOT NULL,
+                        start_time TEXT NOT NULL,
+                        finish_time TEXT NULL,
+                        total_count INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'ACTIVE',
                         synced_at TEXT NULL
                     );
 
@@ -92,12 +107,19 @@ class LocalStorage:
                     CREATE INDEX IF NOT EXISTS idx_outbox_events_synced ON outbox_events(synced_at);
                     CREATE INDEX IF NOT EXISTS idx_outbox_events_line ON outbox_events(line_id);
 
+                    CREATE INDEX IF NOT EXISTS idx_outbox_batches_synced ON outbox_batches(synced_at);
+                    CREATE INDEX IF NOT EXISTS idx_outbox_batches_line ON outbox_batches(line_id);
+
                     CREATE INDEX IF NOT EXISTS idx_outbox_aggregates_synced ON outbox_aggregates(synced_at);
                     CREATE INDEX IF NOT EXISTS idx_outbox_aggregates_line ON outbox_aggregates(line_id);
 
                     CREATE INDEX IF NOT EXISTS idx_health_samples_synced ON health_samples(synced_at);
                     CREATE INDEX IF NOT EXISTS idx_health_samples_line ON health_samples(line_id);
                     """)
+                    try:
+                        conn.execute("ALTER TABLE outbox_events ADD COLUMN batch_id TEXT NULL")
+                    except sqlite3.OperationalError:
+                        pass
                     try:
                         conn.execute("ALTER TABLE health_samples ADD COLUMN accuracy_pct REAL NULL")
                     except sqlite3.OperationalError:
@@ -113,10 +135,16 @@ class LocalStorage:
                 with conn:
                     cursor = conn.execute(
                         """
-                        INSERT INTO outbox_events (line_id, track_id, ts_utc, confidence)
-                        VALUES (?, ?, ?, ?)
+                        INSERT INTO outbox_events (line_id, track_id, ts_utc, confidence, batch_id)
+                        VALUES (?, ?, ?, ?, ?)
                         """,
-                        (line_id, event.track_id, event.ts_utc.isoformat(), event.confidence),
+                        (
+                            line_id,
+                            event.track_id,
+                            event.ts_utc.isoformat(),
+                            event.confidence,
+                            getattr(event, "batch_id", None),
+                        ),
                     )
                     return cursor.lastrowid or 0
             finally:
@@ -199,7 +227,7 @@ class LocalStorage:
         self, limit: int = 100, line_id: str | None = None
     ) -> list[dict[str, Any]]:
         """Retrieve unsynced count events up to limit, optionally filtered by line_id."""
-        query = "SELECT id, line_id, track_id, ts_utc, confidence FROM outbox_events WHERE synced_at IS NULL"
+        query = "SELECT id, line_id, track_id, ts_utc, confidence, batch_id FROM outbox_events WHERE synced_at IS NULL"
         params: list[Any] = []
         if line_id is not None:
             query += " AND line_id = ?"
@@ -312,23 +340,162 @@ class LocalStorage:
             finally:
                 conn.close()
 
+    def start_batch(self, batch: CountingBatchDTO) -> int:
+        """Insert a new active counting batch into outbox_batches table."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO outbox_batches (batch_id, line_id, start_time, finish_time, total_count, status)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            batch.batch_id,
+                            batch.line_id,
+                            batch.start_time.isoformat(),
+                            batch.finish_time.isoformat() if batch.finish_time else None,
+                            batch.total_count,
+                            batch.status,
+                        ),
+                    )
+                    return cursor.lastrowid or 0
+            finally:
+                conn.close()
+
+    def update_batch_count(self, batch_id: str, count: int) -> None:
+        """Update running total_count for an active counting batch."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    conn.execute(
+                        "UPDATE outbox_batches SET total_count = ? WHERE batch_id = ?",
+                        (count, batch_id),
+                    )
+            finally:
+                conn.close()
+
+    def finish_batch(self, batch_id: str, finish_time: datetime, total_count: int) -> bool:
+        """Mark a batch as COMPLETED with finish_time and final total_count."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    cursor = conn.execute(
+                        """
+                        UPDATE outbox_batches
+                        SET finish_time = ?, total_count = ?, status = 'COMPLETED'
+                        WHERE batch_id = ?
+                        """,
+                        (finish_time.isoformat(), total_count, batch_id),
+                    )
+                    return cursor.rowcount > 0
+            finally:
+                conn.close()
+
+    def get_active_batch(self, line_id: str) -> CountingBatchDTO | None:
+        """Retrieve the latest ACTIVE batch for line_id if present."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT batch_id, line_id, start_time, finish_time, total_count, status
+                    FROM outbox_batches
+                    WHERE line_id = ? AND status = 'ACTIVE'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (line_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return CountingBatchDTO(
+                    batch_id=row["batch_id"],
+                    line_id=row["line_id"],
+                    start_time=datetime.fromisoformat(row["start_time"]),
+                    finish_time=datetime.fromisoformat(row["finish_time"]) if row["finish_time"] else None,
+                    total_count=row["total_count"],
+                    status=row["status"],
+                )
+            finally:
+                conn.close()
+
+    def get_unsynced_batches(
+        self, limit: int = 50, line_id: str | None = None
+    ) -> list[CountingBatchDTO]:
+        """Retrieve unsynced completed batches up to limit, optionally filtered by line_id."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                query = """
+                    SELECT batch_id, line_id, start_time, finish_time, total_count, status
+                    FROM outbox_batches
+                    WHERE synced_at IS NULL AND status = 'COMPLETED'
+                """
+                params: list[Any] = []
+                if line_id:
+                    query += " AND line_id = ?"
+                    params.append(line_id)
+                query += " ORDER BY id ASC LIMIT ?"
+                params.append(limit)
+                cursor = conn.execute(query, tuple(params))
+                rows = cursor.fetchall()
+                return [
+                    CountingBatchDTO(
+                        batch_id=r["batch_id"],
+                        line_id=r["line_id"],
+                        start_time=datetime.fromisoformat(r["start_time"]),
+                        finish_time=datetime.fromisoformat(r["finish_time"]) if r["finish_time"] else None,
+                        total_count=r["total_count"],
+                        status=r["status"],
+                    )
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+
+    def mark_batches_synced(
+        self, batch_ids: list[str], synced_at: datetime | None = None
+    ) -> int:
+        """Mark the specified batch IDs as synced."""
+        if not batch_ids:
+            return 0
+        ts = (synced_at or datetime.now(timezone.utc)).isoformat()
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    placeholders = ",".join("?" for _ in batch_ids)
+                    cursor = conn.execute(
+                        f"UPDATE outbox_batches SET synced_at = ? WHERE batch_id IN ({placeholders})",
+                        [ts] + list(batch_ids),
+                    )
+                    return cursor.rowcount
+            finally:
+                conn.close()
+
     def get_unsynced_batch(
         self, line_id: str, limit: int = 100
-    ) -> tuple[SyncBatchPayload | None, dict[str, list[int]]]:
+    ) -> tuple[SyncBatchPayload | None, dict[str, list[Any]]]:
         """
         Package pending items for line_id into a SyncBatchPayload and return their IDs.
 
-        Returns (payload, {"event_ids": [...], "aggregate_ids": [...], "health_ids": [...]})
+        Returns (payload, {"event_ids": [...], "aggregate_ids": [...], "health_ids": [...], "batch_ids": [...]})
         If nothing is pending, returns (None, empty_ids_dict).
         """
         with self._lock:
             unsynced_events = self.get_unsynced_events(limit=limit, line_id=line_id)
             unsynced_aggs = self.get_unsynced_aggregates(limit=limit, line_id=line_id)
             unsynced_health = self.get_unsynced_health(limit=1, line_id=line_id)
+            unsynced_batches = self.get_unsynced_batches(limit=limit, line_id=line_id)
 
             event_ids = [row["id"] for row in unsynced_events]
             agg_ids = [row["id"] for row in unsynced_aggs]
             health_ids = [row["id"] for row in unsynced_health]
+            batch_ids = [b.batch_id for b in unsynced_batches]
 
             empty_ids: dict[str, list[int]] = {
                 "event_ids": [],
@@ -336,7 +503,7 @@ class LocalStorage:
                 "health_ids": [],
             }
 
-            if not event_ids and not agg_ids and not health_ids:
+            if not event_ids and not agg_ids and not health_ids and not batch_ids:
                 return None, empty_ids
 
             events = [
@@ -344,6 +511,8 @@ class LocalStorage:
                     track_id=row["track_id"],
                     ts_utc=datetime.fromisoformat(row["ts_utc"]),
                     confidence=row["confidence"],
+                    line_id=row["line_id"] if "line_id" in row.keys() else line_id,
+                    batch_id=row["batch_id"] if "batch_id" in row.keys() else None,
                 )
                 for row in unsynced_events
             ]
@@ -384,11 +553,13 @@ class LocalStorage:
                 events=events,
                 aggregates=aggregates,
                 health=health_dto,
+                batches=unsynced_batches,
             )
 
             return payload, {
                 "event_ids": event_ids,
                 "aggregate_ids": agg_ids,
                 "health_ids": health_ids,
+                "batch_ids": batch_ids,
             }
 
