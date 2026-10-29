@@ -1,0 +1,128 @@
+diff --git a/main.py b/main.py
+index b156838..5fbc4fb 100644
+--- a/main.py
++++ b/main.py
+@@ -1430,21 +1430,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
+     )
+     parser.add_argument(
+         "--health-interval",
+         type=float,
+         default=float(os.getenv("HEALTH_INTERVAL_SEC") or "10.0"),
+         help="Health telemetry recording interval in seconds (default: 10.0)",
+     )
+     parser.add_argument(
+         "--use-dynamic-accuracy",
+         action="store_true",
+-        default=os.getenv("USE_DYNAMIC_ACCURACY", "").lower() in ("1", "true", "yes"),
++        default=os.getenv("USE_DYNAMIC_ACCURACY", "").strip().lower() in ("1", "true", "yes"),
+         help="Enable dynamic operational tracking accuracy calculation in health telemetry (default: False)",
+     )
+ 
+     parser.add_argument(
+         "--verbose",
+         action="store_true",
+         default=os.getenv("VERBOSE", "").lower() in ("1", "true", "yes"),
+         help="Enable verbose DEBUG logging",
+     )
+ 
+diff --git a/tests/test_counter_telemetry_accuracy.py b/tests/test_counter_telemetry_accuracy.py
+index 15183fc..54b49bb 100644
+--- a/tests/test_counter_telemetry_accuracy.py
++++ b/tests/test_counter_telemetry_accuracy.py
+@@ -1,17 +1,17 @@
+ """Tests for dynamic telemetry tracking accuracy integration and degraded stream alerting."""
+ 
+ import logging
+ from types import SimpleNamespace
+-from unittest.mock import MagicMock
++from unittest.mock import MagicMock, patch
+ 
+-from main import CounterService, build_cli_parser
++from main import CounterService, build_cli_parser, main
+ from src.storage.db import LocalStorage
+ 
+ 
+ def test_telemetry_defaults_to_model_accuracy(tmp_path):
+     """Verify CounterService defaults to recording model_accuracy_pct in telemetry."""
+     db_file = str(tmp_path / "test_default_model.db")
+     storage = LocalStorage(db_path=db_file)
+ 
+     service = CounterService(
+         line_id="lineDefaultModel",
+@@ -21,20 +21,21 @@ def test_telemetry_defaults_to_model_accuracy(tmp_path):
+     assert service.use_dynamic_accuracy is False
+     service.model_accuracy_pct = 95.5
+     service.counter.get_tracking_accuracy_pct = MagicMock(return_value=60.0)
+ 
+     service._record_health()
+ 
+     samples = storage.get_unsynced_health(line_id="lineDefaultModel")
+     assert len(samples) == 1
+     # By default, must record model_accuracy_pct (95.5) NOT dynamic (60.0)
+     assert samples[0]["accuracy_pct"] == 95.5
++    service.counter.get_tracking_accuracy_pct.assert_not_called()
+ 
+ 
+ def test_telemetry_opt_in_dynamic_accuracy(tmp_path):
+     """Verify CounterService records dynamic tracking accuracy when use_dynamic_accuracy=True."""
+     db_file = str(tmp_path / "test_opt_in.db")
+     storage = LocalStorage(db_path=db_file)
+ 
+     service = CounterService(
+         line_id="lineOptIn",
+         storage=storage,
+@@ -115,27 +116,52 @@ def test_cli_parser_use_dynamic_accuracy(monkeypatch):
+     parser = build_cli_parser()
+ 
+     # Default is False
+     args_default = parser.parse_args([])
+     assert args_default.use_dynamic_accuracy is False
+ 
+     # Flag passed
+     args_flag = parser.parse_args(["--use-dynamic-accuracy"])
+     assert args_flag.use_dynamic_accuracy is True
+ 
+-    # Env var default when not specified
+-    monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "1")
++    # Env var default when not specified (test stripping whitespace)
++    monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "  1  \n")
+     parser_env = build_cli_parser()
+     args_env = parser_env.parse_args([])
+     assert args_env.use_dynamic_accuracy is True
+ 
+ 
++def test_main_forwards_use_dynamic_accuracy(monkeypatch):
++    """Verify main() forwards args.use_dynamic_accuracy into CounterService."""
++    monkeypatch.delenv("USE_DYNAMIC_ACCURACY", raising=False)
++
++    with patch("main.CounterService") as mock_service_cls:
++        instance = mock_service_cls.return_value
++        instance.run.return_value = 0
++
++        # Case 1: Default (not enabled)
++        main(["--no-sync", "--max-frames", "1"])
++        call_kwargs = mock_service_cls.call_args.kwargs
++        assert call_kwargs.get("use_dynamic_accuracy") is False
++
++        # Case 2: CLI flag enabled
++        main(["--use-dynamic-accuracy", "--no-sync", "--max-frames", "1"])
++        call_kwargs = mock_service_cls.call_args.kwargs
++        assert call_kwargs.get("use_dynamic_accuracy") is True
++
++        # Case 3: Env var enabled (with whitespace stripping)
++        monkeypatch.setenv("USE_DYNAMIC_ACCURACY", "  true  ")
++        main(["--no-sync", "--max-frames", "1"])
++        call_kwargs = mock_service_cls.call_args.kwargs
++        assert call_kwargs.get("use_dynamic_accuracy") is True
++
++
+ 
+ def test_record_health_uses_dynamic_tracking_accuracy(tmp_path):
+     """Verify dynamic accuracy is stored in HealthSampleDTO and cached in _last_active_accuracy_pct."""
+     db_file = str(tmp_path / "test_dynamic_acc.db")
+     storage = LocalStorage(db_path=db_file)
+ 
+     service = CounterService(
+         line_id="lineDynamicAcc",
+         storage=storage,
+         enable_sync=False,
