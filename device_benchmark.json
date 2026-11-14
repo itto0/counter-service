@@ -1,0 +1,68 @@
+{
+  "specs": {
+    "os": "Windows 11 (64bit)",
+    "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "cpu_count_physical": 14,
+    "cpu_count_logical": 20,
+    "ram_total_gb": 23.78,
+    "ram_available_gb": 6.93,
+    "python_version": "3.14.5",
+    "opencv_version": "5.0.0",
+    "numpy_version": "2.5.4"
+  },
+  "benchmarks": {
+    "synthetic_mock_640x480": {
+      "frames_processed": 300,
+      "total_duration_sec": 0.42,
+      "fps": 714.4,
+      "latency_min_ms": 1.26,
+      "latency_avg_ms": 1.4,
+      "latency_median_ms": 1.37,
+      "latency_p95_ms": 1.65,
+      "latency_p99_ms": 1.89,
+      "latency_max_ms": 2.08,
+      "chickens_counted": 3,
+      "process_cpu_pct": 264.2,
+      "ram_delta_mb": 0.09,
+      "ram_rss_mb": 134.93
+    },
+    "synthetic_shackle_640x480": {
+      "frames_processed": 300,
+      "total_duration_sec": 0.466,
+      "fps": 644.2,
+      "latency_min_ms": 1.36,
+      "latency_avg_ms": 1.55,
+      "latency_median_ms": 1.46,
+      "latency_p95_ms": 2.09,
+      "latency_p99_ms": 2.51,
+      "latency_max_ms": 3.1,
+      "chickens_counted": 0,
+      "process_cpu_pct": 114.1,
+      "ram_delta_mb": 0.06,
+      "ram_rss_mb": 136.25
+    },
+    "real_conveyor_video": {
+      "frames_processed": 300,
+      "total_duration_sec": 3.024,
+      "fps": 99.2,
+      "latency_min_ms": 8.35,
+      "latency_avg_ms": 10.08,
+      "latency_median_ms": 9.85,
+      "latency_p95_ms": 12.14,
+      "latency_p99_ms": 13.14,
+      "latency_max_ms": 14.49,
+      "chickens_counted": 12,
+      "process_cpu_pct": 352.9,
+      "ram_delta_mb": 16.06,
+      "ram_rss_mb": 301.69,
+      "resolution": "1920x1080",
+      "file": "Rekaman_2.MOV"
+    }
+  },
+  "assessment": {
+    "meets_fps_sla": true,
+    "meets_latency_sla": true,
+    "est_concurrent_lines": 3,
+    "device_tier": "Production Edge Ready"
+  }
+}

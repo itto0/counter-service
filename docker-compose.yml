@@ -25,7 +25,7 @@ services:
     volumes:
       - counter_data:/data
       - ${SAMPLES_DIR:-./samples}:/samples:ro
-      - ${MODELS_DIR:-./models}:/app/models:ro 
+      - ${MODELS_DIR:-./models}:/app/models:ro
 
 volumes:
   counter_data:

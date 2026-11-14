@@ -21,3 +21,8 @@ data/
 .git/
 .gitignore
 dataset/
+samples/
+runs/
+.superpowers/
+.mypy_cache/
+.ruff_cache/

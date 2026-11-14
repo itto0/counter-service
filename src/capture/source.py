@@ -1,5 +1,7 @@
 """Capture pipeline abstractions and concrete video sources."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import logging
 import os
@@ -7,6 +9,7 @@ from pathlib import Path
 import queue
 import threading
 import time
+from typing import Any
 import cv2
 import numpy as np
 

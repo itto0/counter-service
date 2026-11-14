@@ -75,7 +75,7 @@ av>=12.0.0
 > **Note on Visual Preview Window (`--show-window`)**:
 > `requirements.txt` specifies `opencv-python-headless` for lightweight container and server execution without display dependencies. If you intend to use the live OpenCV GUI preview window (`--show-window`), install standard `opencv-python`:
 > ```bash
-> pip install opencv-python
+> pip uninstall -y opencv-python-headless && pip install opencv-python
 > ```
 
 ---
@@ -423,6 +423,23 @@ docker compose -f docker-compose.yml logs -f counter
 
 ```bash
 docker compose -f docker-compose.yml down
+```
+
+---
+
+## Performance Benchmarking & Sizing
+
+Measure edge hardware throughput, latency, CPU/memory overhead, and maximum concurrent camera feed capacity:
+
+```bash
+# Run comprehensive device benchmark (Hardware specs, 640x480 & 1080p pipeline, sizing)
+python tools/benchmark_device.py
+
+# Benchmark custom video file with JSON report export
+python tools/benchmark_device.py --video samples/Rekaman_2.MOV --frames 300 --json device_benchmark.json
+
+# Run isolated synthetic pipeline test
+python benchmark.py --frames 300 --detector shackle
 ```
 
 ---
